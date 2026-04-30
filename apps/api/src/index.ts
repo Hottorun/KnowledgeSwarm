@@ -4,6 +4,9 @@ import { config, isSupabaseConfigured, isSearchConfigured } from './config';
 import { testSupabaseConnection } from './supabase';
 import runsRouter from './routes/runs';
 import searchRouter from './routes/search';
+import demoRouter from './routes/demo';
+import downloadsRouter from './routes/downloads';
+import mcpRouter from './routes/mcp';
 
 const app = express();
 
@@ -36,6 +39,9 @@ app.get('/health', async (_req, res) => {
 
 app.use('/runs', runsRouter);
 app.use('/search', searchRouter);
+app.use('/demo', demoRouter);
+app.use('/downloads', downloadsRouter);
+app.use('/mcp', mcpRouter);
 
 app.use((_req, res) => {
   res.status(404).json({ error: 'Not found' });

@@ -13,6 +13,7 @@ export const config = {
   supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || '',
   tavilyApiKey: process.env.TAVILY_API_KEY || '',
   braveSearchApiKey: process.env.BRAVE_SEARCH_API_KEY || '',
+  searchMaxResults: parseInt(process.env.SEARCH_MAX_RESULTS || '5', 10),
   mcpServerUrl: process.env.MCP_SERVER_URL || '',
 };
 

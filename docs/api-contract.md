@@ -186,6 +186,190 @@ Response:
 Side effects:
 - Broadcasts `node.created`, `edge.created`, and `source.created`.
 
+## `POST /runs/:runId/chunks`
+
+Splits extracted document text into overlapping chunks for LLM extraction.
+
+Request:
+
+```json
+{
+  "text": "Long document text...",
+  "chunkSize": 500,
+  "overlap": 50
+}
+```
+
+Response:
+
+```json
+{
+  "ok": true,
+  "chunks": [
+    {
+      "index": 0,
+      "text": "Chunk text...",
+      "startWord": 0,
+      "endWord": 500
+    }
+  ]
+}
+```
+
+## `POST /runs/:runId/uploads/text`
+
+Receives text already read by the browser from drag/drop files and returns chunks for AI extraction.
+
+Frontend should use this for `.txt`, `.md`, and `.csv` first. PDF/Excel can be parsed later by frontend libraries or the orchestrator.
+
+Request:
+
+```json
+{
+  "files": [
+    {
+      "name": "notes.md",
+      "mimeType": "text/markdown",
+      "content": "Acme Corp acquired Beta Inc..."
+    }
+  ],
+  "chunkSize": 500,
+  "overlap": 50
+}
+```
+
+Response:
+
+```json
+{
+  "ok": true,
+  "files": 1,
+  "chunks": 1,
+  "documents": [
+    {
+      "name": "notes.md",
+      "mimeType": "text/markdown",
+      "chunks": [
+        {
+          "index": 0,
+          "text": "Acme Corp acquired Beta Inc...",
+          "startWord": 0,
+          "endWord": 5
+        }
+      ]
+    }
+  ]
+}
+```
+
+## `POST /runs/:runId/raw-triples`
+
+Accepts simple string-based triples from file/MCP extraction and normalizes them into graph nodes and edges.
+
+Request:
+
+```json
+{
+  "agentName": "IngestionAgent",
+  "triples": [
+    {
+      "subject": "Acme Corp",
+      "predicate": "acquired",
+      "object": "Beta Inc",
+      "subjectType": "Company",
+      "objectType": "Company",
+      "confidence": 0.84,
+      "source": {
+        "documentName": "acquisitions.pdf",
+        "page": 3,
+        "snippet": "Acme Corp acquired Beta Inc."
+      },
+      "properties": {
+        "date": "2026-04-01"
+      }
+    }
+  ]
+}
+```
+
+Response:
+
+```json
+{
+  "ok": true,
+  "received": 1,
+  "persisted": 1
+}
+```
+
+Use this endpoint when the AI/extraction layer has raw SPO strings and does not want to construct frontend-ready node IDs.
+
+## `GET /downloads/knowledge-swarm-connector.zip`
+
+Downloads the local files connector bundle.
+
+The ZIP contains:
+
+- `connector.js`
+- `start-mac-linux.sh`
+- `start-windows.ps1`
+- `README.txt`
+
+The connector runs locally at `http://localhost:8790` and exposes:
+
+- `GET /health`
+- `GET /tools/list`
+- `POST /tools/call`
+
+It only reads the folder the user passes to the startup script.
+
+## MCP Connector Proxy
+
+These endpoints let the frontend/backend verify and read from a local MCP connector through the API.
+
+### `GET /mcp/health`
+
+Checks whether `MCP_SERVER_URL` is configured and reachable.
+
+### `GET /mcp/tools`
+
+Lists available bridge tools.
+
+### `GET /mcp/allowed-directories`
+
+Returns the connector's allowed directories.
+
+### `POST /mcp/list-directory`
+
+Request:
+
+```json
+{
+  "path": "/absolute/allowed/folder"
+}
+```
+
+### `POST /mcp/read-file`
+
+Request:
+
+```json
+{
+  "path": "/absolute/allowed/folder/file.txt"
+}
+```
+
+### `POST /mcp/search-files`
+
+Request:
+
+```json
+{
+  "path": "/absolute/allowed/folder",
+  "pattern": "*.txt"
+}
+```
+
 ## `POST /search`
 
 Runs web search through Tavily or Brave.
@@ -251,4 +435,3 @@ The orchestrator should emit stable node IDs. Recommended formats:
 - `person:jane-doe`
 - `document:annual-report-2025`
 - `market:lithium-batteries`
-

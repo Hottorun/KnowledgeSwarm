@@ -13,6 +13,9 @@
 # Backup files
 *.bak
 
+# macOS
+.DS_Store
+
 # Node / TypeScript
 node_modules/
 dist/

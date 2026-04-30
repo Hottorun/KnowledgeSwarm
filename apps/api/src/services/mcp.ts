@@ -59,3 +59,38 @@ export async function mcpListTools(): Promise<string[]> {
     return [];
   }
 }
+
+export async function mcpListDirectory(path: string): Promise<McpToolResult> {
+  return callMcpServer({
+    name: 'list_directory',
+    arguments: { path },
+  });
+}
+
+export async function mcpReadFile(path: string): Promise<McpToolResult> {
+  return callMcpServer({
+    name: 'read_file',
+    arguments: { path },
+  });
+}
+
+export async function mcpReadMultipleFiles(paths: string[]): Promise<McpToolResult> {
+  return callMcpServer({
+    name: 'read_multiple_files',
+    arguments: { paths },
+  });
+}
+
+export async function mcpSearchFiles(basePath: string, pattern: string): Promise<McpToolResult> {
+  return callMcpServer({
+    name: 'search_files',
+    arguments: { path: basePath, pattern },
+  });
+}
+
+export async function mcpListAllowedDirectories(): Promise<McpToolResult> {
+  return callMcpServer({
+    name: 'list_allowed_directories',
+    arguments: {},
+  });
+}
