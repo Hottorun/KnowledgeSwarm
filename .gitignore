@@ -12,3 +12,13 @@
 
 # Backup files
 *.bak
+
+# Node / TypeScript
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Local environment
+.env
+.env.*
+!.env.example
