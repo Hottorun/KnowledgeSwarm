@@ -15,6 +15,7 @@ export const config = {
   braveSearchApiKey: process.env.BRAVE_SEARCH_API_KEY || '',
   searchMaxResults: parseInt(process.env.SEARCH_MAX_RESULTS || '5', 10),
   mcpServerUrl: process.env.MCP_SERVER_URL || '',
+  openaiApiKey: process.env.OPENAI_API_KEY || '',
 };
 
 export function isSupabaseConfigured(): boolean {

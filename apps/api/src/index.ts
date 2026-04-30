@@ -2,11 +2,13 @@ import express from 'express';
 import cors from 'cors';
 import { config, isSupabaseConfigured, isSearchConfigured } from './config';
 import { testSupabaseConnection } from './supabase';
+import { isOpenAIConfigured } from './services/ai';
 import runsRouter from './routes/runs';
 import searchRouter from './routes/search';
 import demoRouter from './routes/demo';
 import downloadsRouter from './routes/downloads';
 import mcpRouter from './routes/mcp';
+import aiRouter from './routes/ai';
 
 const app = express();
 
@@ -33,6 +35,7 @@ app.get('/health', async (_req, res) => {
       supabase: supabaseOk,
       search: search.tavily || search.brave,
       mcp: !!config.mcpServerUrl,
+      openai: isOpenAIConfigured(),
     },
   });
 });
@@ -42,6 +45,7 @@ app.use('/search', searchRouter);
 app.use('/demo', demoRouter);
 app.use('/downloads', downloadsRouter);
 app.use('/mcp', mcpRouter);
+app.use('/ai', aiRouter);
 
 app.use((_req, res) => {
   res.status(404).json({ error: 'Not found' });
@@ -58,4 +62,5 @@ app.listen(config.port, () => {
   console.log(`Supabase: ${isSupabaseConfigured() ? 'configured' : 'not configured (local mode)'}`);
   const search = isSearchConfigured();
   console.log(`Search: ${search.tavily ? 'Tavily' : search.brave ? 'Brave' : 'not configured'}`);
+  console.log(`OpenAI: ${isOpenAIConfigured() ? 'configured' : 'not configured (set via POST /ai/key)'}`);
 });
