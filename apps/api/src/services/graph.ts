@@ -49,7 +49,7 @@ export async function persistTriple(runId: string, triple: Triple): Promise<void
       },
       { onConflict: 'run_id,id' }
     );
-    if (subjectError) throw subjectError;
+    if (subjectError) throw new Error(`Supabase upsert failed for node "${triple.subject.id}": ${subjectError.message}`);
 
     const { error: objectError } = await supabase.from('graph_nodes').upsert(
       {
@@ -62,7 +62,7 @@ export async function persistTriple(runId: string, triple: Triple): Promise<void
       },
       { onConflict: 'run_id,id' }
     );
-    if (objectError) throw objectError;
+    if (objectError) throw new Error(`Supabase upsert failed for node "${triple.object.id}": ${objectError.message}`);
 
     const { data: edge, error: edgeError } = await supabase.from('graph_edges').insert({
       run_id: runId,
@@ -73,7 +73,7 @@ export async function persistTriple(runId: string, triple: Triple): Promise<void
       properties: triple.properties || {},
       created_by_agent: agentName,
     }).select('id').single();
-    if (edgeError) throw edgeError;
+    if (edgeError) throw new Error(`Supabase insert failed for edge "${triple.subject.id}" -> "${triple.object.id}": ${edgeError.message}`);
 
     if (triple.sources) {
       for (const source of triple.sources) {
@@ -84,14 +84,14 @@ export async function persistTriple(runId: string, triple: Triple): Promise<void
           snippet: source.snippet || null,
           metadata: {},
         }).select('id').single();
-        if (sourceError) throw sourceError;
+        if (sourceError) throw new Error(`Supabase insert failed for source "${source.url}": ${sourceError.message}`);
 
         if (edge?.id && sourceRow?.id) {
           const { error: linkError } = await supabase.from('edge_sources').insert({
             edge_id: edge.id,
             source_id: sourceRow.id,
           });
-          if (linkError) throw linkError;
+          if (linkError) throw new Error(`Supabase insert failed for edge_sources link: ${linkError.message}`);
         }
       }
     }

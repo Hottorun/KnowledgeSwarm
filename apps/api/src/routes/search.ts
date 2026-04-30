@@ -25,8 +25,9 @@ router.post('/', async (req: Request, res: Response) => {
       return res.status(503).json({ error: message, hint: 'Set TAVILY_API_KEY or BRAVE_SEARCH_API_KEY in .env' });
     }
 
-    console.error('Search error:', err);
-    return res.status(500).json({ error: 'Search failed' });
+    const provider = message.includes('Tavily') ? 'tavily' : message.includes('Brave') ? 'brave' : 'unknown';
+    console.error(`Search error [${provider}]:`, message);
+    return res.status(500).json({ error: `Search failed (${provider}): ${message}` });
   }
 });
 

@@ -23,7 +23,7 @@ export async function searchWithTavily(query: string): Promise<SearchResponse> {
       query,
       search_depth: 'basic',
       include_answer: false,
-      max_results: 10,
+      max_results: config.searchMaxResults,
     }),
   });
 
@@ -44,7 +44,7 @@ export async function searchWithTavily(query: string): Promise<SearchResponse> {
 }
 
 export async function searchWithBrave(query: string): Promise<SearchResponse> {
-  const params = new URLSearchParams({ q: query, count: '10' });
+  const params = new URLSearchParams({ q: query, count: String(config.searchMaxResults) });
   const response = await fetch(`https://api.search.brave.com/res/v1/web/search?${params}`, {
     headers: {
       'Accept': 'application/json',
