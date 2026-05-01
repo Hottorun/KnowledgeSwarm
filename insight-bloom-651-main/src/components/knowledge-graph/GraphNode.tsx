@@ -11,70 +11,114 @@ export interface GraphNodeData {
   [key: string]: unknown;
 }
 
-const typeStyles: Record<string, { size: string; fontClass: string; bg: string; glow: string; dot: string }> = {
-  root: { size: 'min-w-[180px] px-5 py-4', fontClass: 'text-sm font-semibold', bg: 'var(--kg-node-root)', glow: 'var(--kg-glow-root)', dot: 'var(--kg-dot-root)' },
-  topic: { size: 'min-w-[150px] px-4 py-3', fontClass: 'text-sm font-medium', bg: 'var(--kg-node-topic)', glow: 'var(--kg-glow-topic)', dot: 'var(--kg-dot-topic)' },
-  subtopic: { size: 'min-w-[130px] px-3 py-2.5', fontClass: 'text-xs font-medium', bg: 'var(--kg-node-subtopic)', glow: 'var(--kg-glow-subtopic)', dot: 'var(--kg-dot-subtopic)' },
-  detail: { size: 'min-w-[110px] px-3 py-2', fontClass: 'text-xs', bg: 'var(--kg-node-detail)', glow: 'var(--kg-glow-detail)', dot: 'var(--kg-dot-detail)' },
+const typeStyles: Record<string, { fontClass: string; glow: string; dot: string }> = {
+  root:     { fontClass: 'text-sm font-semibold', glow: 'var(--kg-glow-root)',     dot: 'var(--kg-dot-root)'     },
+  topic:    { fontClass: 'text-sm font-medium',   glow: 'var(--kg-glow-topic)',    dot: 'var(--kg-dot-topic)'    },
+  subtopic: { fontClass: 'text-xs font-medium',   glow: 'var(--kg-glow-subtopic)', dot: 'var(--kg-dot-subtopic)' },
+  detail:   { fontClass: 'text-xs',               glow: 'var(--kg-glow-detail)',   dot: 'var(--kg-dot-detail)'   },
+};
+
+// Fixed dimensions per node type — React Flow always measures these values,
+// preventing node bounds from changing during the compact↔expanded transition.
+const nodeDims: Record<string, { w: number; h: number; dot: number; px: number; py: number; r: string }> = {
+  root:     { w: 180, h: 64, dot: 36, px: 20, py: 16, r: '1rem'   },
+  topic:    { w: 150, h: 52, dot: 28, px: 16, py: 12, r: '1rem'   },
+  subtopic: { w: 130, h: 46, dot: 22, px: 12, py: 10, r: '0.75rem' },
+  detail:   { w: 110, h: 40, dot: 18, px: 12, py:  8, r: '0.75rem' },
 };
 
 function GraphNodeComponent({ data, selected }: NodeProps) {
   const nodeData = data as unknown as GraphNodeData;
   const style = typeStyles[nodeData.nodeType] || typeStyles.detail;
+  const dims = nodeDims[nodeData.nodeType] || nodeDims.detail;
   const isHighlighted = nodeData.isHighlighted === true;
   const isCompact = nodeData.compact === true;
   const [hovered, setHovered] = useState(false);
 
-  if (isCompact) {
-    const dotSize = nodeData.nodeType === 'root' ? 36 : nodeData.nodeType === 'topic' ? 28 : 22;
-    return (
-      <motion.div
-        initial={{ scale: 0, opacity: 0 }}
-        animate={{ scale: 1, opacity: 1 }}
-        transition={{ type: 'spring', stiffness: 300, damping: 25 }}
-        className="cursor-pointer relative"
-        style={{ width: dotSize, height: dotSize }}
-        onMouseEnter={() => setHovered(true)}
-        onMouseLeave={() => setHovered(false)}
+  const cardBorder = selected
+    ? 'var(--kg-node-active)'
+    : isHighlighted
+      ? 'oklch(0.6 0.15 250 / 80%)'
+      : 'var(--kg-node-border)';
+
+  const cardShadow = selected
+    ? '0 0 0 3px var(--kg-node-hover), var(--kg-shadow-md)'
+    : isHighlighted
+      ? `0 0 14px 5px oklch(0.75 0.15 250 / 25%), 0 0 0 1px oklch(0.6 0.15 250 / 50%), var(--kg-shadow-sm)`
+      : `0 0 10px 3px ${style.glow}, var(--kg-shadow-sm)`;
+
+  const dotBorder = selected
+    ? 'var(--kg-node-active)'
+    : isHighlighted
+      ? 'oklch(0.75 0.18 250)'
+      : 'var(--kg-node-border)';
+
+  const dotShadow = selected
+    ? '0 0 0 3px var(--kg-node-hover)'
+    : isHighlighted
+      ? `0 0 14px 6px oklch(0.7 0.18 250 / 50%), 0 0 4px 1px oklch(0.75 0.18 250 / 70%)`
+      : `0 0 6px 2px ${style.glow}`;
+
+  return (
+    <div
+      // Fixed size — React Flow always measures this box regardless of which state is visible.
+      // This prevents node bounds from jumping during the CSS crossfade.
+      style={{ width: dims.w, height: dims.h, position: 'relative', cursor: 'pointer' }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      <Handle type="target" position={Position.Top}   className="!bg-transparent !w-1 !h-1 !border-none !top-0 !left-1/2 !-translate-x-1/2" />
+      <Handle type="target" position={Position.Left}  id="left-t"  className="!bg-transparent !w-1 !h-1 !border-none !left-0 !top-1/2 !-translate-y-1/2" />
+      <Handle type="target" position={Position.Right} id="right-t" className="!bg-transparent !w-1 !h-1 !border-none !right-0 !top-1/2 !-translate-y-1/2" />
+
+      {/* ── Compact dot ─────────────────────────────────────── */}
+      <div
+        style={{
+          position: 'absolute', inset: 0,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          opacity: isCompact ? 1 : 0,
+          // CSS transition — GPU-composited, zero JS per frame
+          transition: 'opacity 0.18s ease',
+          pointerEvents: isCompact ? 'auto' : 'none',
+        }}
       >
-        <Handle type="target" position={Position.Top} className="!bg-transparent !w-1 !h-1 !border-none !top-0 !left-1/2 !-translate-x-1/2" />
-        <Handle type="target" position={Position.Left} id="left-t" className="!bg-transparent !w-1 !h-1 !border-none !left-0 !top-1/2 !-translate-y-1/2" />
-        <Handle type="target" position={Position.Right} id="right-t" className="!bg-transparent !w-1 !h-1 !border-none !right-0 !top-1/2 !-translate-y-1/2" />
         <div
-          className="rounded-full w-full h-full"
           style={{
+            width: dims.dot, height: dims.dot,
+            borderRadius: '50%',
             background: style.dot,
-            border: `2px solid ${selected ? 'var(--kg-node-active)' : isHighlighted ? 'oklch(0.75 0.18 250)' : 'var(--kg-node-border)'}`,
-            boxShadow: selected
-              ? '0 0 0 3px var(--kg-node-hover)'
-              : isHighlighted
-                ? `0 0 14px 6px oklch(0.7 0.18 250 / 50%), 0 0 4px 1px oklch(0.75 0.18 250 / 70%)`
-                : `0 0 6px 2px ${style.glow}`,
+            border: `2px solid ${dotBorder}`,
+            boxShadow: dotShadow,
             transform: isHighlighted ? 'scale(1.25)' : undefined,
             transition: 'transform 0.2s ease, box-shadow 0.2s ease, border 0.2s ease',
           }}
         />
-        {hovered && (
+
+        {hovered && isCompact && (
           <motion.div
-            initial={{ opacity: 0, y: 4, scale: 0.95 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            transition={{ duration: 0.15 }}
-            className="absolute z-50 rounded-xl px-3 py-2 pointer-events-none"
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.12 }}
             style={{
-              top: dotSize + 6,
+              position: 'absolute',
+              top: dims.dot / 2 + 10,
               left: '50%',
               transform: 'translateX(-50%)',
+              zIndex: 50,
               background: 'var(--kg-node-bg)',
               border: '1px solid var(--kg-node-border)',
               boxShadow: 'var(--kg-shadow-md)',
               backdropFilter: 'blur(16px)',
+              borderRadius: '0.75rem',
+              padding: '6px 10px',
               whiteSpace: 'nowrap',
               minWidth: 100,
+              pointerEvents: 'none',
             }}
           >
-            <div className="flex items-center gap-2">
-              <div className="w-2 h-2 rounded-full shrink-0" style={{ background: style.dot }} />
-              <span className="text-xs font-medium" style={{ color: 'var(--foreground)', fontFamily: 'var(--font-display)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <div style={{ width: 8, height: 8, borderRadius: '50%', background: style.dot, flexShrink: 0 }} />
+              <span className={style.fontClass} style={{ color: 'var(--foreground)', fontFamily: 'var(--font-display)' }}>
                 {nodeData.label}
               </span>
             </div>
@@ -85,54 +129,46 @@ function GraphNodeComponent({ data, selected }: NodeProps) {
             )}
           </motion.div>
         )}
-        <Handle type="source" position={Position.Bottom} className="!bg-transparent !w-1 !h-1 !border-none !bottom-0 !left-1/2 !-translate-x-1/2" />
-        <Handle type="source" position={Position.Left} id="left-s" className="!bg-transparent !w-1 !h-1 !border-none !left-0 !top-1/2 !-translate-y-1/2" />
-        <Handle type="source" position={Position.Right} id="right-s" className="!bg-transparent !w-1 !h-1 !border-none !right-0 !top-1/2 !-translate-y-1/2" />
-      </motion.div>
-    );
-  }
-
-  return (
-    <motion.div
-      initial={{ scale: 0, opacity: 0 }}
-      animate={{ scale: 1, opacity: 1 }}
-      transition={{ type: 'spring', stiffness: 300, damping: 25 }}
-       className={`rounded-2xl ${style.size} cursor-pointer`}
-      style={{
-        background: 'var(--kg-node-bg)',
-        border: `1.5px solid ${selected ? 'var(--kg-node-active)' : 'var(--kg-node-border)'}`,
-        boxShadow: selected
-          ? '0 0 0 3px var(--kg-node-hover), var(--kg-shadow-md)'
-          : isHighlighted
-            ? `0 0 14px 5px oklch(0.75 0.15 250 / 25%), 0 0 0 1px oklch(0.6 0.15 250 / 50%), var(--kg-shadow-sm)`
-            : `0 0 10px 3px ${style.glow}, var(--kg-shadow-sm)`,
-      }}
-      whileHover={{
-        boxShadow: `0 0 16px 5px ${style.glow}, 0 4px 16px rgba(0,0,0,0.06)`,
-        y: -1,
-      }}
-    >
-      <Handle type="target" position={Position.Top} className="!bg-border !w-2 !h-2 !border-none" />
-      <Handle type="target" position={Position.Left} id="left-t" className="!bg-transparent !w-1 !h-1 !border-none" />
-      <Handle type="target" position={Position.Right} id="right-t" className="!bg-transparent !w-1 !h-1 !border-none" />
-      <div className="flex items-center gap-2">
-        <div
-          className="w-2 h-2 rounded-full shrink-0"
-          style={{ background: style.dot }}
-        />
-        <span className={style.fontClass} style={{ color: 'var(--foreground)', fontFamily: 'var(--font-display)' }}>
-          {nodeData.label}
-        </span>
       </div>
-      {nodeData.description && (
-        <p className="mt-1 text-xs leading-relaxed" style={{ color: 'var(--muted-foreground)' }}>
-          {nodeData.description}
-        </p>
-      )}
-      <Handle type="source" position={Position.Bottom} className="!bg-border !w-2 !h-2 !border-none" />
-      <Handle type="source" position={Position.Left} id="left-s" className="!bg-transparent !w-1 !h-1 !border-none" />
-      <Handle type="source" position={Position.Right} id="right-s" className="!bg-transparent !w-1 !h-1 !border-none" />
-    </motion.div>
+
+      {/* ── Expanded card ───────────────────────────────────── */}
+      <motion.div
+        style={{
+          position: 'absolute', inset: 0,
+          paddingLeft: dims.px, paddingRight: dims.px,
+          paddingTop: dims.py, paddingBottom: dims.py,
+          borderRadius: dims.r,
+          background: 'var(--kg-node-bg)',
+          border: `1.5px solid ${cardBorder}`,
+          boxShadow: cardShadow,
+          opacity: isCompact ? 0 : 1,
+          // CSS transition for the crossfade
+          transition: 'opacity 0.18s ease, box-shadow 0.2s ease, border 0.2s ease',
+          pointerEvents: isCompact ? 'none' : 'auto',
+          display: 'flex', flexDirection: 'column', justifyContent: 'center',
+        }}
+        whileHover={isCompact ? {} : {
+          boxShadow: `0 0 16px 5px ${style.glow}, 0 4px 16px rgba(0,0,0,0.06)`,
+          y: -1,
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0, background: style.dot }} />
+          <span className={style.fontClass} style={{ color: 'var(--foreground)', fontFamily: 'var(--font-display)' }}>
+            {nodeData.label}
+          </span>
+        </div>
+        {nodeData.description && (
+          <p className="mt-1 text-xs leading-relaxed" style={{ color: 'var(--muted-foreground)' }}>
+            {nodeData.description}
+          </p>
+        )}
+      </motion.div>
+
+      <Handle type="source" position={Position.Bottom} className="!bg-transparent !w-1 !h-1 !border-none !bottom-0 !left-1/2 !-translate-x-1/2" />
+      <Handle type="source" position={Position.Left}  id="left-s"  className="!bg-transparent !w-1 !h-1 !border-none !left-0 !top-1/2 !-translate-y-1/2" />
+      <Handle type="source" position={Position.Right} id="right-s" className="!bg-transparent !w-1 !h-1 !border-none !right-0 !top-1/2 !-translate-y-1/2" />
+    </div>
   );
 }
 

@@ -1,10 +1,21 @@
 import { type EdgeProps, Position, getBezierPath, useInternalNode } from '@xyflow/react';
 
+const compactDotSize: Record<string, number> = { root: 36, topic: 28, subtopic: 22, detail: 18 };
+
 function getNodeCenter(node: any) {
   const pos = node.internals?.positionAbsolute ?? node.positionAbsolute ?? node.position;
-  const w = node.measured?.width ?? node.width ?? 40;
-  const h = node.measured?.height ?? node.height ?? 40;
-  return { x: pos.x + w / 2, y: pos.y + h / 2, w, h };
+  const fullW = node.measured?.width ?? node.width ?? 40;
+  const fullH = node.measured?.height ?? node.height ?? 40;
+
+  // When compact, the dot is centered inside the full bounding box.
+  // Use dot dimensions so edges attach to the dot's edge, not the card's edge.
+  const nodeData = node.data as any;
+  if (nodeData?.compact === true) {
+    const dot = compactDotSize[nodeData?.nodeType] ?? 22;
+    return { x: pos.x + fullW / 2, y: pos.y + fullH / 2, w: dot, h: dot };
+  }
+
+  return { x: pos.x + fullW / 2, y: pos.y + fullH / 2, w: fullW, h: fullH };
 }
 
 const posMap = { top: Position.Top, bottom: Position.Bottom, left: Position.Left, right: Position.Right } as const;

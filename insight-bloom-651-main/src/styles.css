@@ -202,12 +202,19 @@
   border: 1px solid var(--border) !important;
   box-shadow: var(--kg-shadow-md) !important;
   overflow: hidden;
+  display: flex !important;
+  flex-direction: row !important;
 }
 
 .react-flow__controls-button {
   background: var(--kg-node-bg) !important;
-  border-bottom: 1px solid var(--border) !important;
+  border-bottom: none !important;
+  border-right: 1px solid var(--border) !important;
   fill: var(--muted-foreground) !important;
+}
+
+.react-flow__controls-button:last-child {
+  border-right: none !important;
 }
 
 .react-flow__controls-button:hover {

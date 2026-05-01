@@ -8,7 +8,7 @@ interface TopNavProps {
   onToggleConnection: () => void;
 }
 
-export function TopNav({ focusMode, connectionMode, onToggleFocus, onToggleConnection }: TopNavProps) {
+export function TopNav(_props: TopNavProps) {
   const [showProfile, setShowProfile] = useState(false);
 
   return (
@@ -17,9 +17,7 @@ export function TopNav({ focusMode, connectionMode, onToggleFocus, onToggleConne
       <div className="flex items-center gap-2.5">
         <div
           className="w-8 h-8 rounded-xl flex items-center justify-center"
-          style={{
-            background: 'var(--foreground)',
-          }}
+          style={{ background: 'var(--foreground)' }}
         >
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
             <circle cx="8" cy="8" r="3" fill="var(--background)" />
@@ -36,37 +34,6 @@ export function TopNav({ focusMode, connectionMode, onToggleFocus, onToggleConne
         <span className="text-sm font-semibold" style={{ fontFamily: 'var(--font-display)', color: 'var(--foreground)' }}>
           KnowledgeGraph
         </span>
-      </div>
-
-      {/* Center: Mode toggles */}
-      <div
-        className="flex items-center gap-1 rounded-xl px-1.5 py-1"
-        style={{
-          background: 'var(--kg-node-bg)',
-          border: '1px solid var(--border)',
-          boxShadow: 'var(--kg-shadow-sm)',
-        }}
-      >
-        <button
-          onClick={onToggleFocus}
-          className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all duration-200 ${focusMode ? '' : 'hover:bg-accent'}`}
-          style={{
-            background: focusMode ? 'var(--primary)' : 'transparent',
-            color: focusMode ? 'var(--primary-foreground)' : 'var(--muted-foreground)',
-          }}
-        >
-          Focus
-        </button>
-        <button
-          onClick={onToggleConnection}
-          className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all duration-200 ${connectionMode ? '' : 'hover:bg-accent'}`}
-          style={{
-            background: connectionMode ? 'var(--primary)' : 'transparent',
-            color: connectionMode ? 'var(--primary-foreground)' : 'var(--muted-foreground)',
-          }}
-        >
-          Connections
-        </button>
       </div>
 
       {/* Profile */}

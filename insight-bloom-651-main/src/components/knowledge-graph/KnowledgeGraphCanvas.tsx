@@ -1,4 +1,4 @@
-import { useCallback, useState, useMemo, useEffect } from 'react';
+import { useCallback, useState, useMemo, useEffect, useRef } from 'react';
 import {
   ReactFlow,
   ReactFlowProvider,
@@ -26,74 +26,90 @@ import type { AIReasoningStep, DataSource } from './types';
 
 type GraphLayoutNode = Node<GraphNodeData>;
 
-function estimateNodeBounds(node: GraphLayoutNode, childCount: Map<string, number>) {
-  const type = node.data.nodeType;
-  const compact = type !== 'root' && (childCount.get(node.id) || 0) < 3;
+function forceDirectedLayout(layoutNodes: GraphLayoutNode[], layoutEdges: Edge[]): GraphLayoutNode[] {
+  if (layoutNodes.length === 0) return layoutNodes;
 
-  if (compact) {
-    const size = type === 'topic' ? 28 : 22;
-    return { width: size, height: size, padding: 14 };
-  }
+  // Tuning constants
+  const REPULSION = 18000;       // node-to-node repulsion strength
+  const IDEAL_LENGTH = 210;      // preferred edge rest length (pixels)
+  const STIFFNESS = 0.07;        // spring pull along each edge
+  const DAMPING = 0.80;          // velocity decay per step
+  const ITERATIONS = 450;
 
-  if (type === 'root') return { width: 180, height: 64, padding: 24 };
-  if (type === 'topic') return { width: 150, height: 52, padding: 20 };
-  if (type === 'subtopic') return { width: 130, height: 46, padding: 18 };
-  return { width: 110, height: 40, padding: 16 };
-}
+  const pos = new Map<string, { x: number; y: number }>(
+    layoutNodes.map(n => [n.id, { x: n.position.x, y: n.position.y }])
+  );
+  const vel = new Map<string, { x: number; y: number }>(
+    layoutNodes.map(n => [n.id, { x: 0, y: 0 }])
+  );
+  const pinned = new Set(
+    layoutNodes.filter(n => (n.data as GraphNodeData).nodeType === 'root').map(n => n.id)
+  );
 
-function resolveNodeOverlaps(layoutNodes: GraphLayoutNode[], layoutEdges: Edge[]) {
-  const childCount = new Map<string, number>();
-  layoutEdges.forEach(edge => childCount.set(edge.source, (childCount.get(edge.source) || 0) + 1));
+  for (let iter = 0; iter < ITERATIONS; iter++) {
+    const forces = new Map<string, { x: number; y: number }>(
+      layoutNodes.map(n => [n.id, { x: 0, y: 0 }])
+    );
 
-  for (let iteration = 0; iteration < 150; iteration++) {
-    let adjusted = false;
-
+    // Coulomb repulsion between every pair
     for (let i = 0; i < layoutNodes.length; i++) {
       for (let j = i + 1; j < layoutNodes.length; j++) {
-        const first = layoutNodes[i];
-        const second = layoutNodes[j];
-        const firstBounds = estimateNodeBounds(first, childCount);
-        const secondBounds = estimateNodeBounds(second, childCount);
-        const firstCenter = {
-          x: first.position.x + firstBounds.width / 2,
-          y: first.position.y + firstBounds.height / 2,
-        };
-        const secondCenter = {
-          x: second.position.x + secondBounds.width / 2,
-          y: second.position.y + secondBounds.height / 2,
-        };
-        let dx = secondCenter.x - firstCenter.x;
-        let dy = secondCenter.y - firstCenter.y;
-        let distance = Math.hypot(dx, dy);
-        const minimumDistance = Math.max(firstBounds.width, firstBounds.height, secondBounds.width, secondBounds.height) / 2 + firstBounds.padding + secondBounds.padding;
-
-        if (distance >= minimumDistance) continue;
-
-        if (distance < 0.01) {
-          const fallbackAngle = ((i + j) * 137.5 * Math.PI) / 180;
-          dx = Math.cos(fallbackAngle);
-          dy = Math.sin(fallbackAngle);
-          distance = 1;
+        const a = layoutNodes[i];
+        const b = layoutNodes[j];
+        const pa = pos.get(a.id)!;
+        const pb = pos.get(b.id)!;
+        let dx = pb.x - pa.x;
+        let dy = pb.y - pa.y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < 0.01) {
+          // Jitter perfectly coincident nodes so they separate
+          const angle = (i + j * 1.618) * 2.399;
+          dx = Math.cos(angle) * 0.1;
+          dy = Math.sin(angle) * 0.1;
         }
-
-        const push = (minimumDistance - distance) / distance / 2;
-        const pushX = dx * push;
-        const pushY = dy * push;
-
-        if (first.id !== 'root') {
-          first.position = { x: first.position.x - pushX, y: first.position.y - pushY };
-        }
-        if (second.id !== 'root') {
-          second.position = { x: second.position.x + pushX, y: second.position.y + pushY };
-        }
-        adjusted = true;
+        const d = Math.sqrt(d2 || 0.01);
+        const f = REPULSION / (d * d);
+        const fx = (dx / d) * f;
+        const fy = (dy / d) * f;
+        forces.get(a.id)!.x -= fx;
+        forces.get(a.id)!.y -= fy;
+        forces.get(b.id)!.x += fx;
+        forces.get(b.id)!.y += fy;
       }
     }
 
-    if (!adjusted) break;
+    // Hooke spring attraction along each edge
+    for (const edge of layoutEdges) {
+      const pa = pos.get(edge.source);
+      const pb = pos.get(edge.target);
+      if (!pa || !pb) continue;
+      const dx = pb.x - pa.x;
+      const dy = pb.y - pa.y;
+      const d = Math.hypot(dx, dy) || 0.01;
+      const stretch = d - IDEAL_LENGTH;
+      const f = STIFFNESS * stretch;
+      const fx = (dx / d) * f;
+      const fy = (dy / d) * f;
+      forces.get(edge.source)!.x += fx;
+      forces.get(edge.source)!.y += fy;
+      forces.get(edge.target)!.x -= fx;
+      forces.get(edge.target)!.y -= fy;
+    }
+
+    // Semi-implicit Euler integration with damping
+    for (const n of layoutNodes) {
+      if (pinned.has(n.id)) continue;
+      const v = vel.get(n.id)!;
+      const f = forces.get(n.id)!;
+      v.x = (v.x + f.x) * DAMPING;
+      v.y = (v.y + f.y) * DAMPING;
+      const p = pos.get(n.id)!;
+      p.x += v.x;
+      p.y += v.y;
+    }
   }
 
-  return layoutNodes;
+  return layoutNodes.map(n => ({ ...n, position: pos.get(n.id) ?? n.position }));
 }
 
 // Deterministic pseudo-random based on index
@@ -109,12 +125,20 @@ function generateGraphFromText(text: string): { nodes: Node[]; edges: Edge[]; re
   const topics = topicWords.slice(0, 8);
   const rootId = 'root';
 
+  // Pre-supply measured dimensions so React Flow never re-measures nodes when
+  // the compact flag changes (which would cause position/edge jumps).
+  const nodeSizes: Record<string, { width: number; height: number }> = {
+    root: { width: 180, height: 64 }, topic: { width: 150, height: 52 },
+    subtopic: { width: 130, height: 46 }, detail: { width: 110, height: 40 },
+  };
+
   const nodes: GraphLayoutNode[] = [
     {
       id: rootId,
       type: 'graphNode',
       position: { x: 0, y: 0 },
       data: { label: 'Company Data', description: 'Knowledge root', nodeType: 'root' } as GraphNodeData,
+      measured: nodeSizes.root,
     },
   ];
 
@@ -124,7 +148,7 @@ function generateGraphFromText(text: string): { nodes: Node[]; edges: Edge[]; re
   ];
 
   const angleStep = (2 * Math.PI) / topics.length;
-  const baseRadius = 280;
+  const baseRadius = 400;
 
   topics.forEach((topic, i) => {
     const angle = angleStep * i - Math.PI / 2;
@@ -138,6 +162,7 @@ function generateGraphFromText(text: string): { nodes: Node[]; edges: Edge[]; re
         y: Math.sin(angle) * topicRadius,
       },
       data: { label: topic.charAt(0).toUpperCase() + topic.slice(1), nodeType: 'topic' } as GraphNodeData,
+      measured: nodeSizes.topic,
     });
     edges.push({
       id: `e-root-${topicId}`,
@@ -157,7 +182,7 @@ function generateGraphFromText(text: string): { nodes: Node[]; edges: Edge[]; re
     for (let j = 0; j < subCount; j++) {
       const sectorWidth = angleStep * 0.85;
       const subAngle = angle - sectorWidth / 2 + (sectorWidth / (subCount - 1 || 1)) * j;
-      const subRadiusBase = topicRadius + 160 + (seededRandom(i * 13 + j * 17 + 5) - 0.5) * 60;
+      const subRadiusBase = topicRadius + 220 + (seededRandom(i * 13 + j * 17 + 5) - 0.5) * 60;
       const subId = `sub-${i}-${j}`;
       nodes.push({
         id: subId,
@@ -171,6 +196,7 @@ function generateGraphFromText(text: string): { nodes: Node[]; edges: Edge[]; re
           description: 'Related concept',
           nodeType: 'subtopic',
         } as GraphNodeData,
+        measured: nodeSizes.subtopic,
       });
       edges.push({
         id: `e-${topicId}-${subId}`,
@@ -184,7 +210,7 @@ function generateGraphFromText(text: string): { nodes: Node[]; edges: Edge[]; re
       for (let k = 0; k < detailCount; k++) {
         const detailSpread = detailCount > 1 ? 0.3 : 0;
         const detailAngle = subAngle + (k - (detailCount - 1) / 2) * detailSpread;
-        const detailRadius = subRadiusBase + 130 + (seededRandom(i * 23 + j * 31 + k * 41 + 9) - 0.5) * 50;
+        const detailRadius = subRadiusBase + 180 + (seededRandom(i * 23 + j * 31 + k * 41 + 9) - 0.5) * 50;
         const detailId = `detail-${i}-${j}-${k}`;
         nodes.push({
           id: detailId,
@@ -198,6 +224,7 @@ function generateGraphFromText(text: string): { nodes: Node[]; edges: Edge[]; re
             description: 'Detail node',
             nodeType: 'detail' as const,
           } as GraphNodeData,
+          measured: nodeSizes.detail,
         });
         edges.push({
           id: `e-${subId}-${detailId}`,
@@ -216,7 +243,7 @@ function generateGraphFromText(text: string): { nodes: Node[]; edges: Edge[]; re
     type: 'analysis',
   });
 
-  return { nodes: resolveNodeOverlaps(nodes, edges), edges, reasoning };
+  return { nodes: forceDirectedLayout(nodes, edges), edges, reasoning };
 }
 
 function KnowledgeGraphCanvasInner() {
@@ -238,54 +265,54 @@ function KnowledgeGraphCanvasInner() {
   const edgeTypes = useMemo(() => ({ floating: FloatingEdge }), []);
   const [highlightedNodes, setHighlightedNodes] = useState<Set<string>>(new Set());
   const [expandedSubtree, setExpandedSubtree] = useState<Set<string>>(new Set());
-  const [zoomLevel, setZoomLevel] = useState(1);
+  // Track full viewport so panning triggers the expand/compact logic too
+  const [viewport, setViewport] = useState({ x: 0, y: 0, zoom: 1 });
+  const viewportDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useOnViewportChange({
-    onChange: useCallback(({ zoom }: { zoom: number }) => {
-      setZoomLevel(zoom);
+    onChange: useCallback((vp: { x: number; y: number; zoom: number }) => {
+      setViewport(vp);
     }, []),
   });
 
-  // Auto-expand nodes in viewport when zoomed in, auto-compact when zoomed out
+  // Expand nodes visible in the current viewport, compact those that have panned out.
+  // Debounced so mid-gesture frames don't trigger unnecessary state updates.
   useEffect(() => {
-    if (nodes.length <= 50) return; // no compact mode
+    if (nodes.length <= 50) return;
 
-    if (zoomLevel < 0.8) {
-      // Zoomed out far — collapse everything
-      if (expandedSubtree.size > 0) {
-        setExpandedSubtree(new Set());
+    if (viewportDebounceRef.current) clearTimeout(viewportDebounceRef.current);
+
+    viewportDebounceRef.current = setTimeout(() => {
+      if (viewport.zoom < 0.8) {
+        setExpandedSubtree(prev => (prev.size > 0 ? new Set() : prev));
+        return;
       }
-    } else if (zoomLevel >= 0.9 && reactFlowInstance) {
-      // Zoomed in — expand nodes visible in viewport
-      const viewport = reactFlowInstance.getViewport();
-      const screenW = window.innerWidth;
-      const screenH = window.innerHeight;
-      // Convert screen bounds to flow coordinates
+      if (viewport.zoom < 0.9) return; // hysteresis band — don't expand or collapse
+
       const left = (-viewport.x) / viewport.zoom;
       const top = (-viewport.y) / viewport.zoom;
-      const right = left + screenW / viewport.zoom;
-      const bottom = top + screenH / viewport.zoom;
+      const right = left + window.innerWidth / viewport.zoom;
+      const bottom = top + window.innerHeight / viewport.zoom;
 
       const visibleIds = new Set<string>();
       nodes.forEach(n => {
-        if (n.position.x >= left - 200 && n.position.x <= right + 200 &&
-            n.position.y >= top - 200 && n.position.y <= bottom + 200) {
+        if (
+          n.position.x >= left - 200 && n.position.x <= right + 200 &&
+          n.position.y >= top - 200 && n.position.y <= bottom + 200
+        ) {
           visibleIds.add(n.id);
         }
       });
 
-      if (visibleIds.size > 0) {
-        setExpandedSubtree(prev => {
-          const merged = new Set(prev);
-          let changed = false;
-          visibleIds.forEach(id => {
-            if (!merged.has(id)) { merged.add(id); changed = true; }
-          });
-          return changed ? merged : prev;
-        });
-      }
-    }
-  }, [zoomLevel, nodes, reactFlowInstance, expandedSubtree.size]);
+      // Replace (not merge) so nodes that pan off-screen compact back
+      setExpandedSubtree(prev => {
+        if (prev.size === visibleIds.size && [...visibleIds].every(id => prev.has(id))) return prev;
+        return visibleIds;
+      });
+    }, 120);
+
+    return () => { if (viewportDebounceRef.current) clearTimeout(viewportDebounceRef.current); };
+  }, [viewport, nodes]);
 
   const handleDataSubmit = useCallback((text: string) => {
     setIsDissolving(true);
@@ -416,7 +443,11 @@ function KnowledgeGraphCanvasInner() {
       });
     }
 
-    setNodes(prev => [...prev, ...newNodes]);
+    setNodes(prev => {
+      const combined = [...prev, ...newNodes] as GraphLayoutNode[];
+      const allEdges = [...edges, ...newEdges];
+      return forceDirectedLayout(combined, allEdges);
+    });
     setEdges(prev => [...prev, ...newEdges]);
     setReasoningSteps(prev => [...prev, {
       id: `r-${Date.now()}`,
