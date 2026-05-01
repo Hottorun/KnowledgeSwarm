@@ -328,6 +328,86 @@ function findReferencedNode(question: string, graphNodes: Node[]): Node | null {
   return candidates.find(candidate => normalizedQuestion.includes(` ${candidate.normalizedLabel} `))?.node ?? null;
 }
 
+function mostConnectedNodeId(nodeIds: Set<string>, edgeList: Edge[]): string | null {
+  let bestId: string | null = null;
+  let bestDegree = -1;
+
+  for (const id of nodeIds) {
+    let degree = 0;
+    for (const edge of edgeList) {
+      if (edge.source === id && nodeIds.has(edge.target)) degree++;
+      if (edge.target === id && nodeIds.has(edge.source)) degree++;
+    }
+    if (degree > bestDegree) {
+      bestDegree = degree;
+      bestId = id;
+    }
+  }
+
+  return bestId;
+}
+
+function layoutVisibleNeighborhood(
+  graphNodes: Node[],
+  edgeList: Edge[],
+  preferredCenterId: string | null,
+): Node[] {
+  if (graphNodes.length === 0) return graphNodes;
+
+  const visibleIds = new Set(graphNodes.map(node => node.id));
+  const centerId = preferredCenterId && visibleIds.has(preferredCenterId)
+    ? preferredCenterId
+    : mostConnectedNodeId(visibleIds, edgeList) ?? graphNodes[0].id;
+
+  const centerNode = graphNodes.find(node => node.id === centerId) ?? graphNodes[0];
+  const neighbors = graphNodes
+    .filter(node => node.id !== centerNode.id)
+    .sort((a, b) => {
+      const aDirect = edgeList.some(edge =>
+        (edge.source === centerNode.id && edge.target === a.id) ||
+        (edge.target === centerNode.id && edge.source === a.id)
+      ) ? 0 : 1;
+      const bDirect = edgeList.some(edge =>
+        (edge.source === centerNode.id && edge.target === b.id) ||
+        (edge.target === centerNode.id && edge.source === b.id)
+      ) ? 0 : 1;
+      if (aDirect !== bDirect) return aDirect - bDirect;
+      const aDegree = edgeList.filter(edge => edge.source === a.id || edge.target === a.id).length;
+      const bDegree = edgeList.filter(edge => edge.source === b.id || edge.target === b.id).length;
+      return bDegree - aDegree;
+    });
+
+  const positioned = new Map<string, { x: number; y: number }>();
+  positioned.set(centerNode.id, { x: 0, y: 0 });
+
+  let index = 0;
+  let ring = 0;
+  while (index < neighbors.length) {
+    const remaining = neighbors.length - index;
+    const radius = 250 + ring * 150;
+    const capacity = Math.max(6, Math.floor((Math.PI * 2 * radius) / 210));
+    const count = Math.min(remaining, capacity);
+    const angleOffset = ring % 2 === 0 ? -Math.PI / 2 : -Math.PI / 2 + Math.PI / Math.max(count, 1);
+
+    for (let i = 0; i < count; i++) {
+      const node = neighbors[index + i];
+      const angle = angleOffset + (Math.PI * 2 * i) / count;
+      positioned.set(node.id, {
+        x: Math.cos(angle) * radius,
+        y: Math.sin(angle) * radius,
+      });
+    }
+
+    index += count;
+    ring++;
+  }
+
+  return graphNodes.map(node => ({
+    ...node,
+    position: positioned.get(node.id) ?? node.position,
+  }));
+}
+
 function GraphMiniMap({
   nodes,
   viewport,
@@ -1667,8 +1747,10 @@ function KnowledgeGraphCanvasInner() {
   useEffect(() => {
     if (activeNodeId !== null || nodes.length === 0) return;
     const root = nodes.find(n => (n.data as GraphNodeData).nodeType === 'root');
-    setActiveNodeId((root ?? nodes[0]).id);
-  }, [activeNodeId, nodes]);
+    const nodeIds = new Set(nodes.map(node => node.id));
+    const hubId = mostConnectedNodeId(nodeIds, edges);
+    setActiveNodeId(root?.id ?? hubId ?? nodes[0].id);
+  }, [activeNodeId, nodes, edges]);
 
   useEffect(() => {
     if (activeNodeId && !nodes.some(n => n.id === activeNodeId)) {
@@ -1736,7 +1818,7 @@ function KnowledgeGraphCanvasInner() {
       ? nodesWithHighlight
       : nodesWithHighlight.filter(n => neighborhoodIds.has(n.id));
     const visibleIds = new Set(candidates.map(n => n.id));
-    return candidates.map(n => {
+    const nodesWithCounts = candidates.map(n => {
       const allNeighbors = adjacency.get(n.id);
       let hidden = 0;
       if (allNeighbors) {
@@ -1744,7 +1826,13 @@ function KnowledgeGraphCanvasInner() {
       }
       return { ...n, data: { ...n.data, hiddenCount: hidden } };
     });
-  }, [showAllNodes, nodesWithHighlight, neighborhoodIds, adjacency]);
+
+    return layoutVisibleNeighborhood(
+      nodesWithCounts,
+      edges,
+      showAllNodes ? mostConnectedNodeId(visibleIds, edges) : activeNodeId,
+    );
+  }, [showAllNodes, nodesWithHighlight, neighborhoodIds, adjacency, edges, activeNodeId]);
 
   const visibleEdges = useMemo(() => {
     if (showAllNodes) return edges;
