@@ -590,6 +590,120 @@ export async function describeNode(
   }
 }
 
+export interface QueryGraphInput {
+  question: string;
+  nodes: SubtreeNode[];
+  edges: SubtreeEdge[];
+}
+
+export interface QueryGraphResult {
+  answer: string;
+  newTriples: RawExtractedTriple[];
+  searchQueries: string[];
+  searchResultCount: number;
+}
+
+export async function queryGraph(input: QueryGraphInput): Promise<QueryGraphResult> {
+  const { question, nodes, edges } = input;
+
+  const nodeList = nodes.slice(0, 60).map(n => `- ${n.label} (${n.type})`).join('\n');
+  const edgeList = edges.slice(0, 60).map(e => `  ${e.subjectLabel} --[${e.predicate}]--> ${e.objectLabel}`).join('\n');
+
+  // Step 1: Generate targeted search queries
+  const planRaw = await callOpenAI([{
+    role: 'user',
+    content: `You are a research planner for a knowledge graph. Given a user's question and the current graph, generate 2-4 focused web search queries.
+
+QUESTION: ${question}
+
+CURRENT GRAPH NODES:
+${nodeList || '(empty)'}
+
+CURRENT GRAPH EDGES (sample):
+${edgeList.slice(0, 2000) || '(none)'}
+
+Output JSON: {
+  "graph_insight": "what the current graph already tells us about this question (1-2 sentences)",
+  "queries": ["query1", "query2"]
+}`,
+  }], { jsonMode: true, temperature: 0.2 });
+
+  const plan = JSON.parse(planRaw) as { graph_insight?: string; queries?: string[] };
+  const searchQueries: string[] = ((plan.queries as string[]) || []).slice(0, 4);
+  if (searchQueries.length === 0) searchQueries.push(question);
+
+  // Step 2: Run searches in parallel
+  const searchResults = await Promise.allSettled(searchQueries.map(q => performSearch(q)));
+  const allWebContext: string[] = [];
+  let searchResultCount = 0;
+
+  for (let i = 0; i < searchResults.length; i++) {
+    const result = searchResults[i];
+    if (result.status === 'fulfilled') {
+      for (const r of result.value.results) {
+        allWebContext.push(`[${searchQueries[i]}] ${r.title}: ${r.snippet}`);
+        searchResultCount++;
+      }
+    }
+  }
+
+  // Step 3: Extract answer + new graph triples
+  const existingLabels = nodes.map(n => n.label).join(', ');
+
+  const extractRaw = await callOpenAI([{
+    role: 'system',
+    content: `You are a knowledge graph analyst. Given a user's question, the current graph, and web research:
+1. Answer the question directly and concisely
+2. Extract new entity relationships (triples) that extend the graph to support the answer
+
+TRIPLE RULES:
+- Subject/Object: specific named entities or data points (no generic phrases)
+- Predicate: short verb phrase 1-4 words (e.g. "founded_by", "competes_with", "reported", "located_in")
+- Types: Company, Person, Market, Product, Technology, Location, Concept, Entity
+- Only extract information NOT already captured in the existing node list
+- At least one triple must anchor to an existing graph node (use the exact label)
+- Max 8 triples; quality over quantity
+
+Output JSON: {
+  "answer": "direct 2-4 sentence answer",
+  "triples": [{ "subject": string, "predicate": string, "object": string, "subjectType": string, "objectType": string, "confidence": number }]
+}`,
+  }, {
+    role: 'user',
+    content: `QUESTION: ${question}
+
+GRAPH INSIGHT: ${plan.graph_insight || 'No prior context'}
+
+EXISTING NODES (do not duplicate): ${existingLabels}
+
+EXISTING RELATIONSHIPS (sample):
+${edgeList.slice(0, 1500)}
+
+WEB RESEARCH:
+${allWebContext.slice(0, 20).join('\n\n')}`,
+  }], { jsonMode: true, temperature: 0.1 });
+
+  const extracted = JSON.parse(extractRaw) as { answer?: string; triples?: Array<Record<string, unknown>> };
+  const answer = extracted.answer || 'I found additional information and extended the graph.';
+
+  const existingNodeLabels = nodes.map(n => n.label);
+  const rawTriples: RawExtractedTriple[] = (extracted.triples || [])
+    .filter(t => t.subject && t.predicate && t.object)
+    .slice(0, 8)
+    .map(t => ({
+      subject: String(t.subject),
+      predicate: String(t.predicate),
+      object: String(t.object),
+      subjectType: t.subjectType ? String(t.subjectType) : undefined,
+      objectType: t.objectType ? String(t.objectType) : undefined,
+      confidence: typeof t.confidence === 'number' ? t.confidence : 0.7,
+    }));
+
+  const newTriples = filterToConnectedTriples(rawTriples, nodes[0]?.label ?? '', existingNodeLabels);
+
+  return { answer, newTriples, searchQueries, searchResultCount };
+}
+
 export interface NodeCategory {
   label: string;
   nodeIds: string[];

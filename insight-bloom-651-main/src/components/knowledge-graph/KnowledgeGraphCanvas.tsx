@@ -25,7 +25,8 @@ import { EdgeButton } from './EdgeButton';
 import { FloatingEdge } from './FloatingEdge';
 import type { AIReasoningStep, DataSource } from './types';
 import type { NodeRelationship } from './NodeInputBox';
-import { createRun, extractFromText, openRunStream, expandSubtree as apiExpandSubtree, categorizeNodes, type ExpandContext, type NodeCategory } from '@/lib/api';
+import { createRun, extractFromText, openRunStream, expandSubtree as apiExpandSubtree, queryGraph as apiQueryGraph, categorizeNodes, type ExpandContext, type NodeCategory } from '@/lib/api';
+import { QueryBox } from './QueryBox';
 
 type GraphLayoutNode = Node<GraphNodeData>;
 
@@ -326,6 +327,9 @@ function KnowledgeGraphCanvasInner() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [categories, setCategories] = useState<NodeCategory[]>([]);
   const categorizationCountRef = useRef(0);
+  const [isQuerying, setIsQuerying] = useState(false);
+  const [queryAnswer, setQueryAnswer] = useState<string | null>(null);
+  const [queryNewNodesCount, setQueryNewNodesCount] = useState(0);
   const reactFlowInstance = useReactFlow();
 
   const nodeTypes = useMemo(() => ({ graphNode: GraphNodeMemo }), []);
@@ -353,6 +357,9 @@ function KnowledgeGraphCanvasInner() {
   const layoutDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const edgesRef = useRef<Edge[]>([]);
   const isSwarmExtraction = useRef(false);
+  // Set to true while a graph query is in flight so SSE nodes commit immediately
+  // (no batch buffering, no fitView) — same as expansion mode but anchorless.
+  const queryModeRef = useRef(false);
   // Nodes the user has manually dragged — pinned so re-layouts after expansion
   // don't snap them back to their physics-determined position.
   const userMovedRef = useRef<Set<string>>(new Set());
@@ -539,6 +546,11 @@ function KnowledgeGraphCanvasInner() {
           id: bridgeEdgeId, source: anchor.id, target: backendNode.id,
           label: 'expands', type: 'floating',
         }]);
+      } else if (queryModeRef.current) {
+        // Query mode: commit immediately but no bridge edge and no fitView — the
+        // debounce will re-layout existing nodes without disturbing the viewport.
+        expansionNewNodesRef.current.add(backendNode.id);
+        setNodes(prev => prev.some(n => n.id === backendNode.id) ? prev : [...prev, newNode]);
       } else {
         if (appendModeRef.current) {
           // Document uploads after the first graph should extend the current
@@ -655,6 +667,16 @@ function KnowledgeGraphCanvasInner() {
             id: edgeId, source: edgeSource, target: backendEdge.target,
             label: backendEdge.predicate, type: 'floating',
             data: edgeData,
+          }];
+        });
+      } else if (queryModeRef.current) {
+        // Query mode: commit edges immediately like expansion, no buffering
+        setEdges(prev => {
+          if (prev.some(edge => edge.id === edgeId)) return prev;
+          return [...prev, {
+            id: edgeId, source: edgeSource, target: backendEdge.target,
+            label: backendEdge.predicate, type: 'floating',
+            data: { confidence: backendEdge.confidence },
           }];
         });
       } else {
@@ -1344,6 +1366,72 @@ function KnowledgeGraphCanvasInner() {
     return () => clearTimeout(timer);
   }, [isProcessing, nodes]);
 
+  const handleQuery = useCallback(async (question: string) => {
+    if (!runId || isQuerying) return;
+
+    setIsQuerying(true);
+    setQueryAnswer(null);
+    setQueryNewNodesCount(0);
+
+    setReasoningSteps(prev => [...prev, {
+      id: `q-${Date.now()}`,
+      text: `Query: "${question}"`,
+      timestamp: new Date(),
+      type: 'analysis',
+    }]);
+
+    // Snapshot node/edge context for the query
+    const queryNodes = nodesRef.current.map(n => ({
+      id: n.id,
+      label: (n.data as GraphNodeData).label,
+      type: (n.data as GraphNodeData).description ?? 'Entity',
+    }));
+    const queryEdges = edgesRef.current
+      .filter(e => typeof e.label === 'string' && e.label && e.label !== 'expands')
+      .map(e => ({
+        subjectLabel: (nodesRef.current.find(n => n.id === e.source)?.data as GraphNodeData)?.label ?? e.source,
+        predicate: typeof e.label === 'string' ? e.label : (e.data as { predicate?: string })?.predicate ?? 'related_to',
+        objectLabel: (nodesRef.current.find(n => n.id === e.target)?.data as GraphNodeData)?.label ?? e.target,
+      }));
+
+    // Track node count before query so we can report how many were added
+    const nodeCountBefore = nodesRef.current.length;
+
+    // Flag SSE handler to commit query nodes immediately (not via batch layout)
+    queryModeRef.current = true;
+
+    try {
+      const result = await apiQueryGraph(runId, question, queryNodes, queryEdges);
+      setQueryAnswer(result.answer);
+
+      // Wait for SSE debounce to flush new nodes, then compute delta
+      await new Promise(r => setTimeout(r, 900));
+      const added = nodesRef.current.length - nodeCountBefore;
+      setQueryNewNodesCount(Math.max(0, added));
+
+      if (result.newTriplesPersisted > 0) {
+        setReasoningSteps(prev => [...prev, {
+          id: `q-done-${Date.now()}`,
+          text: `Query complete: ${result.newTriplesPersisted} new connection(s) added to graph.`,
+          timestamp: new Date(),
+          type: 'expansion',
+        }]);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Query failed';
+      setQueryAnswer(`Sorry, I couldn't complete that query: ${msg}`);
+      setReasoningSteps(prev => [...prev, {
+        id: `q-err-${Date.now()}`,
+        text: `Query error: ${msg}`,
+        timestamp: new Date(),
+        type: 'analysis',
+      }]);
+    } finally {
+      queryModeRef.current = false;
+      setIsQuerying(false);
+    }
+  }, [runId, isQuerying, setReasoningSteps]);
+
   const handlePaneClick = useCallback(() => {
     setSelectedNode(null);
     setInputBoxPos(null);
@@ -1418,7 +1506,7 @@ function KnowledgeGraphCanvasInner() {
         {!isEmpty && (
           <Controls
             showInteractive={false}
-            position="bottom-center"
+            position="bottom-right"
           />
         )}
       </ReactFlow>
@@ -1552,6 +1640,19 @@ function KnowledgeGraphCanvasInner() {
       {/* Side panels */}
       <SidePanel side="left" isOpen={leftPanel} onClose={() => setLeftPanel(false)} nodes={nodes} edges={edges} onNodeFocus={handleNodeFocus} onFocusMultiple={handleFocusMultiple} categories={categories} />
       <SidePanel side="right" isOpen={rightPanel} onClose={() => setRightPanel(false)} reasoningSteps={reasoningSteps} />
+
+      {/* Floating query box — appears once the graph is loaded */}
+      <AnimatePresence>
+        {!isEmpty && !isProcessing && (
+          <QueryBox
+            onQuery={handleQuery}
+            isQuerying={isQuerying}
+            answer={queryAnswer}
+            newNodesCount={queryNewNodesCount}
+            onDismissAnswer={() => { setQueryAnswer(null); setQueryNewNodesCount(0); }}
+          />
+        )}
+      </AnimatePresence>
     </div>
   );
 }

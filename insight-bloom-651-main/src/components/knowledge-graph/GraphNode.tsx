@@ -33,6 +33,10 @@ export const charWidths: Record<string, number> = {
 
 export const LABEL_WRAP_AT = 25;
 
+// Extra right-side space added to the node box when a badge is present so the
+// pill never sits flush against the card's rounded corner.
+const BADGE_WALL_CLEARANCE = 12;
+
 export function calcNodeDims(
   nodeType: string,
   label: string,
@@ -46,10 +50,14 @@ export function calcNodeDims(
   const labelLines = Math.ceil(label.length / LABEL_WRAP_AT);
   const effectiveLineChars = Math.min(label.length, LABEL_WRAP_AT);
 
-  // Width: fit the longest line (capped at 25 chars), expand for short labels + optional badge
-  const badgeW = hasAccent && description ? description.length * 5.5 + 20 : 0;
+  // Badge: 6px/char at 10px font + 12px horizontal padding
+  const badgeW = hasAccent && description ? description.length * 6 + 12 : 0;
   const innerW = 16 + effectiveLineChars * charW + (badgeW > 0 ? 8 + badgeW : 0);
-  const w = Math.max(base.w, Math.ceil(innerW + 2 * base.px));
+
+  // When a badge is present, add BADGE_WALL_CLEARANCE to the right side so
+  // the node box itself grows instead of leaving the tag close to the border.
+  const rightPad = base.px + (badgeW > 0 ? BADGE_WALL_CLEARANCE : 0);
+  const w = Math.max(base.w, Math.ceil(innerW + base.px + rightPad));
 
   // Height: grow with label lines
   let h = Math.max(base.h, base.py * 2 + labelLines * lineH);

@@ -17,7 +17,8 @@ export function runSwarmExtraction(runId: string, text: string, documentName = '
       return;
     }
 
-    const child = spawn('node', ['dist/index.js', '--', '--run-id', runId, '--document-name', documentName, '--stdin'], {
+    const tsxBin = require('path').join(config.swarmOrchestratorCwd, 'node_modules', '.bin', 'tsx');
+    const child = spawn(tsxBin, ['src/index.ts', '--', '--run-id', runId, '--document-name', documentName, '--stdin'], {
       cwd: config.swarmOrchestratorCwd,
       env: {
         ...process.env,

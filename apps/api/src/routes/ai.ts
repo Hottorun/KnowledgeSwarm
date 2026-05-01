@@ -6,6 +6,7 @@ import { runSwarmExtraction } from '../services/swarm';
 import { broadcast } from '../sse';
 import {
   expandSubtree,
+  queryGraph,
   extractTriplesFromChunk,
   describeNode,
   categorizeNodes,
@@ -206,6 +207,53 @@ router.post('/runs/:runId/expand-subtree', async (req: Request, res: Response) =
     return res.json({ summary, newTriplesPersisted: triples.length });
   } catch (err) {
     return handleRouteError(res, err, 'Expansion failed');
+  }
+});
+
+const queryGraphSchema = z.object({
+  question: z.string().min(1),
+  nodes: z.array(z.object({
+    id: z.string(),
+    label: z.string(),
+    type: z.string().optional(),
+  })).optional().default([]),
+  edges: z.array(z.object({
+    subjectLabel: z.string(),
+    predicate: z.string(),
+    objectLabel: z.string(),
+  })).optional().default([]),
+});
+
+router.post('/runs/:runId/query-graph', async (req: Request, res: Response) => {
+  try {
+    const runId = String(req.params.runId);
+    const { question, nodes, edges } = queryGraphSchema.parse(req.body);
+
+    if (!isOpenAIConfigured()) {
+      return res.status(503).json({ error: 'AI not configured — set OPENAI_API_KEY or add a key via the key modal' });
+    }
+
+    await emit(runId, 'QueryAgent', 'searching', `Researching: "${question.slice(0, 80)}"`);
+
+    const result = await queryGraph({
+      question,
+      nodes: nodes.map(n => ({ id: n.id, label: n.label, type: n.type || 'Entity' })),
+      edges,
+    });
+
+    const triples = normalizeExtractedTriples('QueryAgent', result.newTriples);
+    for (const triple of triples) {
+      await persistTriple(runId, triple);
+    }
+
+    await emit(runId, 'QueryAgent', 'completed', result.answer.slice(0, 120));
+    return res.json({
+      answer: result.answer,
+      newTriplesPersisted: triples.length,
+      searchQueries: result.searchQueries,
+    });
+  } catch (err) {
+    return handleRouteError(res, err, 'Query failed');
   }
 });
 

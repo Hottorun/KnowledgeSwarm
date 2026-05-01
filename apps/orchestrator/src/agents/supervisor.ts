@@ -83,7 +83,7 @@ async function supervisorReview(branch: BranchPlan, specialist: SpecialistProfil
 
   const response = await client.messages.create({
     model: config.supervisorModel,
-    max_tokens: 4096,
+    max_tokens: 8192,
     system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
     messages: [{
       role: 'user',

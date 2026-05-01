@@ -1,22 +1,71 @@
 export function parseJsonObject<T>(text: string): T {
-  const trimmed = text.trim();
+  // Strip markdown fences first
+  const fenced = text.trim().match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const raw = (fenced?.[1] ?? text).trim();
+
+  // Fast path
+  try {
+    return JSON.parse(raw) as T;
+  } catch { /* fall through */ }
+
+  // Extract outermost {...}
+  const first = raw.indexOf('{');
+  if (first === -1) throw new Error(`No JSON object in model output: ${raw.slice(0, 200)}`);
+  const last = raw.lastIndexOf('}');
+  const candidate = last > first ? raw.slice(first, last + 1) : raw.slice(first);
 
   try {
-    return JSON.parse(trimmed) as T;
-  } catch {
-    const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
-    if (fenced?.[1]) {
-      return JSON.parse(fenced[1].trim()) as T;
-    }
+    return JSON.parse(candidate) as T;
+  } catch { /* fall through */ }
 
-    const first = trimmed.indexOf('{');
-    const last = trimmed.lastIndexOf('}');
-    if (first !== -1 && last > first) {
-      return JSON.parse(trimmed.slice(first, last + 1)) as T;
-    }
-
-    throw new Error(`No JSON object found in model output: ${trimmed.slice(0, 300)}`);
+  // Model hit max_tokens — JSON is truncated. Recover up to the last complete
+  // array element (depth-1 close), strip any trailing comma, close open brackets.
+  const recovered = recoverTruncated(candidate);
+  if (recovered) {
+    try {
+      return JSON.parse(recovered) as T;
+    } catch { /* fall through */ }
   }
+
+  throw new Error(`Failed to parse JSON from model output: ${raw.slice(0, 300)}`);
+}
+
+function recoverTruncated(s: string): string | null {
+  const stack: string[] = [];
+  let inString = false;
+  let escape = false;
+  let lastDepth1Close = -1;
+
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (escape) { escape = false; continue; }
+    if (ch === '\\' && inString) { escape = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+
+    if (ch === '{' || ch === '[') {
+      stack.push(ch);
+    } else if (ch === '}' || ch === ']') {
+      stack.pop();
+      if (stack.length === 1) {
+        // Just closed an element that lives directly inside the root container
+        lastDepth1Close = i;
+      } else if (stack.length === 0) {
+        // Cleanly closed the root — no truncation
+        return s.slice(0, i + 1);
+      }
+    }
+  }
+
+  if (lastDepth1Close < 0 || stack.length === 0) return null;
+
+  // Truncate to the last safe close, strip a trailing comma if present
+  let safe = s.slice(0, lastDepth1Close + 1).trimEnd();
+  if (safe.endsWith(',')) safe = safe.slice(0, -1);
+
+  // Close all still-open brackets in reverse order
+  const closes = [...stack].reverse().map(c => (c === '{' ? '}' : ']')).join('');
+  return safe + closes;
 }
 
 export function parseJsonArrayPropertyItems(text: string, propertyName: string): unknown[] {

@@ -220,6 +220,24 @@ export interface ExpandContext {
   globalBranches?: string[];
 }
 
+export async function queryGraph(
+  runId: string,
+  question: string,
+  nodes: SubtreeNode[],
+  edges: SubtreeEdge[],
+): Promise<{ answer: string; newTriplesPersisted: number; searchQueries: string[] }> {
+  const res = await fetch(`${API_BASE}/ai/runs/${runId}/query-graph`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question, nodes, edges }),
+  });
+  if (!res.ok) {
+    const data = await res.json() as { error?: string };
+    throw new Error(data.error ?? 'Query failed');
+  }
+  return res.json() as Promise<{ answer: string; newTriplesPersisted: number; searchQueries: string[] }>;
+}
+
 export async function expandSubtree(
   runId: string,
   rootNode: SubtreeNode,

@@ -40,13 +40,9 @@ export async function orchestrate(
     console.log(`  -> ${branches[i].id}: ${specialist.agentName} (${specialist.kind})`)
   );
 
-  const branchChunks = chunks.length <= branches.length
-    ? branches.map(() => chunks)
-    : branches.map(() => [] as typeof chunks);
-
-  if (chunks.length > branches.length) {
-    chunks.forEach((chunk, i) => branchChunks[i % branches.length].push(chunk));
-  }
+  // Every branch processes every chunk — each specialist extracts what's relevant
+  // to their focus from the full document, deduplication handles the overlap.
+  const branchChunks = branches.map(() => chunks);
 
   await emitAgentEvent(runId, 'MetaAgent', 'dispatching', `${branches.length} specialists in parallel`, {
     documentType,

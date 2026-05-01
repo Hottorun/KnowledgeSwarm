@@ -46,7 +46,7 @@ ${chunk.text}`;
 
   const response = await client.messages.create({
     model: config.workerModel,
-    max_tokens: 2048,
+    max_tokens: 4096,
     system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
     messages: [{ role: 'user', content: userMessage }],
   });
