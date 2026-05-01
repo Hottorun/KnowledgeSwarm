@@ -47,8 +47,16 @@ function calcNodeDims(nodeType: string, label: string, description: string | und
   return { w, h };
 }
 
+// Hardcoded fallback so a malformed node never collapses to a 0×0 box and
+// drags every other node into the top-left corner during overlap resolution.
+const FALLBACK_DIMS = { w: 200, h: 50 };
+
 function getNodeDims(n: WorkerNode) {
-  return calcNodeDims(n.data.nodeType, n.data.label, n.data.description, true);
+  const dims = calcNodeDims(n.data.nodeType ?? 'detail', n.data.label ?? '', n.data.description, true);
+  return {
+    w: dims.w > 0 ? dims.w : FALLBACK_DIMS.w,
+    h: dims.h > 0 ? dims.h : FALLBACK_DIMS.h,
+  };
 }
 
 const REPULSION = 28000;

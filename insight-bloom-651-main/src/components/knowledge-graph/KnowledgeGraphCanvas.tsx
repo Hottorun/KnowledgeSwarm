@@ -1,4 +1,4 @@
-import { useCallback, useState, useMemo, useEffect, useRef } from 'react';
+import { useCallback, useState, useMemo, useEffect, useRef, useDeferredValue } from 'react';
 import {
   ReactFlow,
   ReactFlowProvider,
@@ -1535,6 +1535,11 @@ function KnowledgeGraphCanvasInner() {
     }));
   }, [nodes, edges, highlightedNodes, aiHighlightedNodes, expandedSubtree, pinnedExpansion]);
 
+  // Defer the array passed to React Flow so React can interrupt the (potentially
+  // expensive) paint of large graphs to keep the UI responsive to user input.
+  const deferredNodes = useDeferredValue(nodesWithHighlight);
+  const deferredEdges = useDeferredValue(edges);
+
   return (
     <div className="w-screen h-screen relative overflow-hidden" style={{ background: 'var(--kg-canvas)' }}>
       <TopNav
@@ -1559,8 +1564,8 @@ function KnowledgeGraphCanvasInner() {
       {!isEmpty && <EdgeButton side="right" label="Reasoning" icon="🧠" onClick={() => setRightPanel(p => !p)} isActive={rightPanel} />}
 
       <ReactFlow
-        nodes={nodesWithHighlight}
-        edges={edges}
+        nodes={deferredNodes}
+        edges={deferredEdges}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onNodeClick={handleNodeClick}
