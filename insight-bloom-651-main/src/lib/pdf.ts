@@ -1,14 +1,19 @@
 import * as pdfjsLib from 'pdfjs-dist';
 
-// Use the CDN worker so Vite doesn't need to bundle the heavy worker file.
-pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
+// Vite resolves new URL(…, import.meta.url) as a local asset — no CDN required.
+pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+  'pdfjs-dist/build/pdf.worker.min.mjs',
+  import.meta.url,
+).href;
 
 export async function extractFileText(file: File): Promise<string> {
   if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
     const buffer = await file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
-    const pageTexts: string[] = [];
 
+    const loadingTask = pdfjsLib.getDocument({ data: buffer });
+    const pdf = await loadingTask.promise;
+
+    const pageTexts: string[] = [];
     for (let i = 1; i <= pdf.numPages; i++) {
       const page = await pdf.getPage(i);
       const content = await page.getTextContent();

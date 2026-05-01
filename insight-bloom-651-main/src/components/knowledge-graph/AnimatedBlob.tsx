@@ -47,7 +47,7 @@ export function AnimatedBlob({ onDataSubmit, isDissolving }: AnimatedBlobProps) 
   const [mcpError, setMcpError] = useState('');
 
   const handleFiles = useCallback(async (files: File[]) => {
-    const accepted = files.filter(f => /\.(txt|md|csv|json)$/i.test(f.name));
+    const accepted = files.filter(f => READABLE_EXTENSIONS.test(f.name));
     if (accepted.length === 0) return;
     const contents = await Promise.all(accepted.map(async file => ({
       name: file.name,
