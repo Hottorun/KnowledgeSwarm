@@ -8,6 +8,7 @@ import {
   expandSubtree,
   extractTriplesFromChunk,
   describeNode,
+  categorizeNodes,
   isOpenAIConfigured,
   setRuntimeOpenAIKey,
   validateKeyFormat,
@@ -202,6 +203,25 @@ router.post('/runs/:runId/expand-subtree', async (req: Request, res: Response) =
     return res.json({ summary, newTriplesPersisted: triples.length });
   } catch (err) {
     return handleRouteError(res, err, 'Expansion failed');
+  }
+});
+
+const categorizeSchema = z.object({
+  nodes: z.array(z.object({
+    id: z.string(),
+    label: z.string(),
+    type: z.string().optional().default('Entity'),
+  })),
+});
+
+router.post('/categorize-nodes', async (req: Request, res: Response) => {
+  try {
+    const { nodes } = categorizeSchema.parse(req.body);
+    if (!isOpenAIConfigured()) return res.json({ categories: [] });
+    const categories = await categorizeNodes(nodes.map(n => ({ id: n.id, label: n.label, type: n.type || 'Entity' })));
+    return res.json({ categories });
+  } catch (err) {
+    return handleRouteError(res, err, 'Categorization failed');
   }
 });
 

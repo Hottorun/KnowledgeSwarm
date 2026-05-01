@@ -3,6 +3,102 @@ import { motion, AnimatePresence } from 'framer-motion';
 import type { AIReasoningStep } from './types';
 import type { Node, Edge } from '@xyflow/react';
 import type { GraphNodeData } from './GraphNode';
+import type { NodeCategory } from '@/lib/api';
+
+function CategoryList({
+  categories,
+  nodes,
+  onFocusMultiple,
+  onNodeFocus,
+}: {
+  categories: NodeCategory[];
+  nodes: Node[];
+  onFocusMultiple?: (nodeIds: string[]) => void;
+  onNodeFocus?: (nodeId: string) => void;
+}) {
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const nodeMap = new Map(nodes.map(n => [n.id, n]));
+
+  const toggle = (label: string) => {
+    setExpanded(prev => {
+      const next = new Set(prev);
+      if (next.has(label)) next.delete(label);
+      else next.add(label);
+      return next;
+    });
+  };
+
+  return (
+    <div className="space-y-1">
+      {categories.map(cat => {
+        const validIds = cat.nodeIds.filter(id => nodeMap.has(id));
+        const isOpen = expanded.has(cat.label);
+        return (
+          <div key={cat.label}>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => toggle(cat.label)}
+                className="w-5 h-5 flex items-center justify-center shrink-0 rounded transition-colors hover:bg-accent"
+                style={{ color: 'var(--muted-foreground)' }}
+              >
+                <svg
+                  width="9" height="9" viewBox="0 0 10 10" fill="none"
+                  style={{ transform: isOpen ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.15s' }}
+                >
+                  <path d="M3 1.5L7 5L3 8.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+              <button
+                onClick={() => validIds.length > 0 && onFocusMultiple?.(validIds)}
+                className="flex-1 flex items-center gap-2 text-left rounded-lg px-2 py-1 transition-colors hover:bg-accent"
+              >
+                <span className="text-sm font-semibold leading-tight" style={{ color: 'var(--foreground)' }}>
+                  {cat.label}
+                </span>
+                <span
+                  className="ml-auto text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0"
+                  style={{ background: 'var(--secondary)', color: 'var(--muted-foreground)', border: '1px solid var(--border)' }}
+                >
+                  {validIds.length}
+                </span>
+              </button>
+            </div>
+            <AnimatePresence>
+              {isOpen && (
+                <motion.div
+                  initial={{ height: 0, opacity: 0 }}
+                  animate={{ height: 'auto', opacity: 1 }}
+                  exit={{ height: 0, opacity: 0 }}
+                  transition={{ duration: 0.15 }}
+                  className="overflow-hidden"
+                >
+                  {validIds.map(id => {
+                    const n = nodeMap.get(id)!;
+                    const label = (n.data as GraphNodeData).label;
+                    return (
+                      <div key={id} className="flex items-center" style={{ paddingLeft: 20 }}>
+                        <span className="w-5 h-5 flex items-center justify-center shrink-0">
+                          <span className="w-1 h-1 rounded-full" style={{ background: 'var(--muted-foreground)', opacity: 0.4 }} />
+                        </span>
+                        <button
+                          onClick={() => onNodeFocus?.(id)}
+                          className="flex-1 text-left rounded-lg px-2 py-1 text-xs transition-colors hover:bg-accent"
+                          style={{ color: 'var(--muted-foreground)' }}
+                        >
+                          {label}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 interface TocNode {
   id: string;
@@ -120,10 +216,12 @@ interface SidePanelProps {
   nodes?: Node[];
   edges?: Edge[];
   onNodeFocus?: (nodeId: string) => void;
+  onFocusMultiple?: (nodeIds: string[]) => void;
+  categories?: NodeCategory[];
   reasoningSteps?: AIReasoningStep[];
 }
 
-export function SidePanel({ side, isOpen, onClose, nodes = [], edges = [], onNodeFocus, reasoningSteps = [] }: SidePanelProps) {
+export function SidePanel({ side, isOpen, onClose, nodes = [], edges = [], onNodeFocus, onFocusMultiple, categories = [], reasoningSteps = [] }: SidePanelProps) {
   const isLeft = side === 'left';
 
   // Build TOC tree by traversing edges from root nodes
@@ -199,7 +297,9 @@ export function SidePanel({ side, isOpen, onClose, nodes = [], edges = [], onNod
           {/* Content */}
           <div className="p-5 overflow-y-auto" style={{ height: 'calc(100% - 57px)' }}>
             {isLeft ? (
-              tocRoots.length === 0 ? (
+              categories.length > 0 ? (
+                <CategoryList categories={categories} nodes={nodes} onFocusMultiple={onFocusMultiple} onNodeFocus={onNodeFocus} />
+              ) : tocRoots.length === 0 ? (
                 <p className="text-xs" style={{ color: 'var(--muted-foreground)' }}>
                   Build a mind map to see its table of contents here.
                 </p>

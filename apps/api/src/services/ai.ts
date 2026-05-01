@@ -566,3 +566,39 @@ export async function describeNode(
     return null;
   }
 }
+
+export interface NodeCategory {
+  label: string;
+  nodeIds: string[];
+}
+
+export async function categorizeNodes(
+  nodes: Array<{ id: string; label: string; type: string }>,
+): Promise<NodeCategory[]> {
+  if (nodes.length === 0) return [];
+  const capped = nodes.slice(0, 60);
+  const nodeList = capped.map(n => `${n.id} | ${n.label} (${n.type})`).join('\n');
+
+  try {
+    const raw = await callOpenAI([
+      {
+        role: 'system',
+        content: `You are a knowledge graph analyst. Group the given entities into 3–7 meaningful semantic categories.
+Rules:
+- Each category gets a short, descriptive label (2–4 words).
+- Every node must appear in exactly one category.
+- Use the nodeIds exactly as provided.
+Output ONLY valid JSON: { "categories": [{ "label": string, "nodeIds": string[] }] }`,
+      },
+      {
+        role: 'user',
+        content: `Entities (id | label (type)):\n${nodeList}`,
+      },
+    ], { jsonMode: true, temperature: 0.2 });
+
+    const parsed = JSON.parse(raw) as { categories?: Array<{ label: string; nodeIds: string[] }> };
+    return (parsed.categories ?? []).filter(c => c.label && c.nodeIds?.length > 0);
+  } catch {
+    return [];
+  }
+}

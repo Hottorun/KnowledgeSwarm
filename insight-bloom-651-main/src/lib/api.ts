@@ -80,6 +80,28 @@ export async function extractFromText(
   }
 }
 
+export interface NodeCategory {
+  label: string;
+  nodeIds: string[];
+}
+
+export async function categorizeNodes(
+  nodes: Array<{ id: string; label: string; type: string }>,
+): Promise<NodeCategory[]> {
+  try {
+    const res = await fetch(`${API_BASE}/ai/categorize-nodes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nodes }),
+    });
+    if (!res.ok) return [];
+    const data = await res.json() as { categories: NodeCategory[] };
+    return data.categories ?? [];
+  } catch {
+    return [];
+  }
+}
+
 export interface NodeRelationship {
   direction: 'out' | 'in';
   predicate: string;

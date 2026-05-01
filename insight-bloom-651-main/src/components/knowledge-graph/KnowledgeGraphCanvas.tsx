@@ -25,7 +25,7 @@ import { EdgeButton } from './EdgeButton';
 import { FloatingEdge } from './FloatingEdge';
 import type { AIReasoningStep, DataSource } from './types';
 import type { NodeRelationship } from './NodeInputBox';
-import { createRun, extractFromText, extractFromFile, openRunStream, expandSubtree as apiExpandSubtree, type ExpandContext } from '@/lib/api';
+import { createRun, extractFromText, extractFromFile, openRunStream, expandSubtree as apiExpandSubtree, categorizeNodes, type ExpandContext, type NodeCategory } from '@/lib/api';
 
 type GraphLayoutNode = Node<GraphNodeData>;
 
@@ -306,6 +306,8 @@ function KnowledgeGraphCanvasInner() {
   const [runId, setRunId] = useState<string | null>(null);
   const [expandingNodeId, setExpandingNodeId] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [categories, setCategories] = useState<NodeCategory[]>([]);
+  const categorizationCountRef = useRef(0);
   const reactFlowInstance = useReactFlow();
 
   const nodeTypes = useMemo(() => ({ graphNode: GraphNodeMemo }), []);
@@ -1209,6 +1211,25 @@ function KnowledgeGraphCanvasInner() {
     }
   }, [runId]);
 
+  // Re-categorize nodes 2s after graph settles (initial load or after expansion)
+  useEffect(() => {
+    if (isProcessing || nodes.length < 3) return;
+    const nodeCount = nodes.length;
+    if (nodeCount === categorizationCountRef.current) return;
+    const timer = setTimeout(() => {
+      categorizationCountRef.current = nodeCount;
+      const nodeList = nodes.map(n => ({
+        id: n.id,
+        label: (n.data as GraphNodeData).label,
+        type: (n.data as GraphNodeData).description ?? 'Entity',
+      }));
+      categorizeNodes(nodeList).then(cats => {
+        if (cats.length > 0) setCategories(cats);
+      });
+    }, 2000);
+    return () => clearTimeout(timer);
+  }, [isProcessing, nodes]);
+
   const handlePaneClick = useCallback(() => {
     setSelectedNode(null);
     setInputBoxPos(null);
@@ -1389,7 +1410,7 @@ function KnowledgeGraphCanvasInner() {
       )}
 
       {/* Side panels */}
-      <SidePanel side="left" isOpen={leftPanel} onClose={() => setLeftPanel(false)} nodes={nodes} edges={edges} onNodeFocus={handleNodeFocus} />
+      <SidePanel side="left" isOpen={leftPanel} onClose={() => setLeftPanel(false)} nodes={nodes} edges={edges} onNodeFocus={handleNodeFocus} onFocusMultiple={handleFocusMultiple} categories={categories} />
       <SidePanel side="right" isOpen={rightPanel} onClose={() => setRightPanel(false)} reasoningSteps={reasoningSteps} />
     </div>
   );
