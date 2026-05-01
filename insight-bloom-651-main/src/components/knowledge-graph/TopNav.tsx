@@ -20,24 +20,26 @@ export function TopNav({ onSearchOpen, onUploadDocuments, graphLoaded }: TopNavP
     <div className="fixed top-0 left-0 right-0 z-30 flex items-center justify-between px-5 py-3">
       {/* Logo */}
       <div className="flex items-center gap-2.5">
-        <div
-          className="w-8 h-8 rounded-xl flex items-center justify-center"
-          style={{ background: 'var(--foreground)' }}
-        >
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-            <circle cx="8" cy="8" r="3" fill="var(--background)" />
-            <circle cx="3" cy="4" r="1.5" fill="var(--background)" opacity="0.6" />
-            <circle cx="13" cy="4" r="1.5" fill="var(--background)" opacity="0.6" />
-            <circle cx="5" cy="13" r="1.5" fill="var(--background)" opacity="0.6" />
-            <circle cx="12" cy="12" r="1.5" fill="var(--background)" opacity="0.6" />
-            <line x1="8" y1="8" x2="3" y2="4" stroke="var(--background)" strokeWidth="0.5" opacity="0.4" />
-            <line x1="8" y1="8" x2="13" y2="4" stroke="var(--background)" strokeWidth="0.5" opacity="0.4" />
-            <line x1="8" y1="8" x2="5" y2="13" stroke="var(--background)" strokeWidth="0.5" opacity="0.4" />
-            <line x1="8" y1="8" x2="12" y2="12" stroke="var(--background)" strokeWidth="0.5" opacity="0.4" />
-          </svg>
+        <div className="w-7 h-7 rounded-full relative overflow-hidden flex-shrink-0">
+          <div
+            className="absolute inset-0 rounded-full"
+            style={{
+              background: 'linear-gradient(135deg, var(--kg-blob-1), var(--kg-blob-2))',
+              animation: 'blob-morph 6s ease-in-out infinite, blob-pulse 4s ease-in-out infinite',
+              opacity: 0.9,
+            }}
+          />
+          <div
+            className="absolute inset-1 rounded-full"
+            style={{
+              background: 'linear-gradient(225deg, var(--kg-blob-2), var(--kg-blob-1))',
+              animation: 'blob-morph 6s ease-in-out infinite reverse',
+              opacity: 0.55,
+            }}
+          />
         </div>
         <span className="text-sm font-semibold" style={{ fontFamily: 'var(--font-display)', color: 'var(--foreground)' }}>
-          KnowledgeGraph
+          Mapify
         </span>
       </div>
 
