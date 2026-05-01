@@ -295,8 +295,9 @@ function GraphNodeComponent({ data, selected }: NodeProps) {
               color: 'var(--foreground)',
               fontFamily: 'var(--font-display)',
               maxWidth: `${LABEL_WRAP_AT}ch`,
-              whiteSpace: 'normal',
-              wordBreak: 'break-word',
+              whiteSpace: nodeData.label.length > LABEL_WRAP_AT ? 'normal' : 'nowrap',
+              wordBreak: 'normal',
+              overflowWrap: 'break-word',
               lineHeight: '1.4',
             }}
           >
