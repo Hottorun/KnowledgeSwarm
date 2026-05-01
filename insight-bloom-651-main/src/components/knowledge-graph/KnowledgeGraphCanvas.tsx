@@ -896,10 +896,17 @@ function KnowledgeGraphCanvasInner() {
   }, [connectRunStream, setNodes, setEdges]);
 
   const handleNodeClick = useCallback((_: React.MouseEvent, node: Node) => {
-    // Neighbor-only navigation: clicking a node makes it the new focal point.
-    // The next render unmounts whatever's no longer in the new node's 1-hop
-    // neighborhood and mounts the new neighbors. Triggers a refit afterwards.
+    // Cluster bubble: temporarily expand the full graph until the user clicks
+    // empty pane (which fires handlePaneClick and re-clusters).
+    if (node.id === CLUSTER_NODE_ID) {
+      setShowAllNodes(true);
+      needsInitialFitRef.current = true;
+      return;
+    }
+    // Regular node: re-focus the neighborhood on this node and re-cluster
+    // everything else.
     setActiveNodeId(node.id);
+    setShowAllNodes(false);
     needsInitialFitRef.current = true;
     setSelectedNode(node);
     const childIds = new Set(
@@ -1541,6 +1548,8 @@ function KnowledgeGraphCanvasInner() {
     setAiHighlightedNodes(new Set());
     setExpandedSubtree(new Set());
     setLeftPanel(false);
+    // Clicking empty pane re-clusters: drop back to neighborhood + cluster bubble
+    setShowAllNodes(false);
   }, []);
 
   const nodesWithHighlight = useMemo(() => {
@@ -1563,24 +1572,26 @@ function KnowledgeGraphCanvasInner() {
     }));
   }, [nodes, edges, highlightedNodes, aiHighlightedNodes, expandedSubtree, pinnedExpansion]);
 
-  // Neighbor-only rendering: only the active node + its 1-hop neighbors are
-  // mounted in React Flow at any time. The full nodes/edges arrays stay in
-  // state (side panel, search, expansion all read from them) — we just filter
-  // at render time so the DOM never holds more than ~10 GraphNode instances.
+  // Cluster-rendering: by default we mount only the active node + its 1-hop
+  // neighbors, plus a single "+N more" cluster bubble representing every
+  // other node. Clicking the cluster temporarily expands the full graph;
+  // clicking empty pane re-clusters. The master nodes/edges arrays stay
+  // intact (side panel, search, AI reasoning all keep working).
   const [activeNodeId, setActiveNodeId] = useState<string | null>(null);
+  const [showAllNodes, setShowAllNodes] = useState(false);
+  const CLUSTER_NODE_ID = '__cluster__';
 
-  // Auto-focus the root once the first batch lands
+  // Auto-focus the first node that arrives — try root first, else fall back
+  // to whichever node landed first (SSE nodes never carry nodeType='root').
   useEffect(() => {
-    if (activeNodeId !== null) return;
+    if (activeNodeId !== null || nodes.length === 0) return;
     const root = nodes.find(n => (n.data as GraphNodeData).nodeType === 'root');
-    if (root) setActiveNodeId(root.id);
+    setActiveNodeId((root ?? nodes[0]).id);
   }, [activeNodeId, nodes]);
 
-  // If the active node disappears (undo, deletion), fall back to root
   useEffect(() => {
     if (activeNodeId && !nodes.some(n => n.id === activeNodeId)) {
-      const root = nodes.find(n => (n.data as GraphNodeData).nodeType === 'root');
-      setActiveNodeId(root?.id ?? null);
+      setActiveNodeId(nodes[0]?.id ?? null);
     }
   }, [activeNodeId, nodes]);
 
@@ -1594,15 +1605,39 @@ function KnowledgeGraphCanvasInner() {
     return ids;
   }, [activeNodeId, edges]);
 
-  const visibleNodes = useMemo(
-    () => nodesWithHighlight.filter(n => neighborhoodIds.has(n.id)),
-    [nodesWithHighlight, neighborhoodIds],
-  );
+  // Visible set = neighborhood, plus a cluster bubble standing in for everything
+  // else. When the user clicks the cluster, showAllNodes flips and we render
+  // the full graph until they click empty pane.
+  const visibleNodes = useMemo<Node[]>(() => {
+    if (showAllNodes) return nodesWithHighlight;
+    if (nodesWithHighlight.length === 0) return nodesWithHighlight;
+    const inNeighborhood = nodesWithHighlight.filter(n => neighborhoodIds.has(n.id));
+    const others = nodesWithHighlight.filter(n => !neighborhoodIds.has(n.id));
+    if (others.length === 0) return inNeighborhood;
+    // Place the cluster bubble at the centroid of all hidden nodes so it
+    // visually points toward where the rest of the graph "lives".
+    const cx = others.reduce((s, n) => s + n.position.x, 0) / others.length;
+    const cy = others.reduce((s, n) => s + n.position.y, 0) / others.length;
+    const cluster: Node = {
+      id: CLUSTER_NODE_ID,
+      type: 'graphNode',
+      position: { x: cx, y: cy },
+      data: {
+        label: `+${others.length} more`,
+        nodeType: 'topic',
+        description: 'cluster — click to expand',
+      },
+    };
+    return [...inNeighborhood, cluster];
+  }, [showAllNodes, nodesWithHighlight, neighborhoodIds]);
 
-  const visibleEdges = useMemo(
-    () => edges.filter(e => neighborhoodIds.has(e.source) && neighborhoodIds.has(e.target)),
-    [edges, neighborhoodIds],
-  );
+  const visibleEdges = useMemo(() => {
+    if (showAllNodes) return edges;
+    if (!activeNodeId) return [];
+    // Only edges whose both endpoints are in the rendered (neighborhood) set;
+    // the cluster bubble has no real edges, just the visual presence.
+    return edges.filter(e => neighborhoodIds.has(e.source) && neighborhoodIds.has(e.target));
+  }, [showAllNodes, edges, activeNodeId, neighborhoodIds]);
 
   // Defer the (already-filtered, small) array passed to React Flow so React
   // can interrupt the paint to keep the UI responsive during rapid navigation.
