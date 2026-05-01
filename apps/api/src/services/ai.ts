@@ -150,6 +150,34 @@ export interface ExpandSubtreeResult {
   searchResultCount: number;
 }
 
+// BFS over the LLM's new triples starting from rootLabel. Drops triples whose
+// endpoints can't be reached from the root through other new triples — this is
+// what kills orphan nodes that would otherwise float in the canvas with no edge
+// connecting them back to the user's clicked node.
+function filterToConnectedTriples(
+  triples: RawExtractedTriple[],
+  rootLabel: string,
+): RawExtractedTriple[] {
+  if (triples.length === 0) return triples;
+
+  const norm = (s: string) => s.toLowerCase().trim();
+  const root = norm(rootLabel);
+
+  const reachable = new Set<string>([root]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const t of triples) {
+      const s = norm(t.subject);
+      const o = norm(t.object);
+      if (reachable.has(s) && !reachable.has(o)) { reachable.add(o); grew = true; }
+      else if (reachable.has(o) && !reachable.has(s)) { reachable.add(s); grew = true; }
+    }
+  }
+
+  return triples.filter(t => reachable.has(norm(t.subject)) && reachable.has(norm(t.object)));
+}
+
 export async function expandSubtree(input: ExpandSubtreeInput): Promise<ExpandSubtreeResult> {
   const { rootNode, nodes, edges, question, parentNode, siblings = [], graphDepth = 0, globalBranches = [] } = input;
 
@@ -286,6 +314,36 @@ ${allWebContext.join('\n\n')}
 
 ════ MANDATORY RULES ════
 
+RULE 0 — QUESTION DECOMPOSITION (DO THIS FIRST, MENTALLY):
+${userQuestionDriven
+  ? `Before generating any triples, decompose the user's question into:
+  (a) ATTRIBUTE — what is the user actually asking about? (e.g. "age", "salary", "release date", "founder")
+  (b) OWNER — which entity logically POSSESSES that attribute? (e.g. "the CEO", "the founder", "the iPhone 15")
+
+Then check: is the OWNER the same as "${rootNode.label}"?
+
+  • OWNER == "${rootNode.label}"  → attach the attribute directly to "${rootNode.label}".
+        Example: question "revenue in 2023" on root "Acme Corp"
+          OK:  Acme Corp --[revenue_2023]--> "$2.1B"
+
+  • OWNER != "${rootNode.label}"  → you MUST first create the OWNER as a child of "${rootNode.label}",
+        THEN attach the attribute to the OWNER. NEVER jam them into one predicate.
+
+        Example: question "age of the CEO" on root "Acme Corp"
+          REQUIRED CHAIN:
+            Acme Corp --[has_ceo]--> "Jane Smith"
+            "Jane Smith" --[age]--> "47"
+          STRICTLY FORBIDDEN — these will be REJECTED:
+            Acme Corp --[ceo_age]--> "47"
+            Acme Corp --[has_ceo_age]--> "47"
+            Acme Corp --[age_of_ceo]--> "47"
+            Acme Corp --[ceo_is_47]--> "47"
+
+  • If the OWNER already exists in ALL EXISTING NODE LABELS above, reuse that exact label string.
+  • Compound predicates (snake_case combining two concepts like "founder_age", "ceo_salary",
+    "product_release_date") are FORBIDDEN. Always split them into a chain.`
+  : `No user question — focus on generating direct sub-categories of "${rootNode.label}".`}
+
 ${depthRule}
 
 RULE 2 — ANTI-DUPLICATION:
@@ -298,22 +356,12 @@ RULE 3 — HIERARCHICAL CONTEXT:
 • Do NOT revert to generic facts about the parent entity "${parentNode?.label ?? 'root'}".
 • Example: expanding "Corporate Leadership" under "Apple Inc" → generate "Board of Directors", "Executive Team", "Leadership History" — NOT "Apple Revenue" or "iPhone Sales".
 
-RULE 4 — REACHABLE FROM ROOT (multi-hop chains allowed):
+RULE 4 — REACHABLE FROM ROOT (no orphan triples):
 Every new node must be reachable from "${rootNode.label}" through a chain of new triples.
-Single-hop is preferred, but MULTI-HOP CHAINS rooted at "${rootNode.label}" are allowed and ENCOURAGED when the user's question targets a property of a sub-entity.
-
-Example: question = "age of the founder" on rootNode "Acne Studios"
-  WRONG (single-hop, attaches age to wrong entity):
-    Acne Studios --[founder_age]--> "55"
-  CORRECT (multi-hop chain):
-    Acne Studios --[founded_by]--> "Jonny Johansson"
-    "Jonny Johansson" --[age]--> "57"
-
-Rules for chains:
-• At least one triple in the chain MUST have "${rootNode.label}" as subject.
-• Every other new node must be transitively connected to "${rootNode.label}" via the new triples you generate.
-• Do NOT generate disconnected triples between two unrelated third-party entities.
-• If the user's question implies "X of Y of ${rootNode.label}", you MUST create the intermediate "Y" node first, then attach "X" to "Y".
+• At least one triple MUST have "${rootNode.label}" exactly as subject.
+• Every other new node MUST be transitively reachable from "${rootNode.label}" via the new triples you generate.
+• Triples between two third-party entities that don't connect back to "${rootNode.label}" are FORBIDDEN — they will be dropped.
+• Before submitting, mentally trace: can I walk from "${rootNode.label}" to every new node using only new triples? If no → remove that triple.
 
 Also write a 2–3 sentence summary of the most important new findings specifically about "${rootNode.label}".
 
@@ -336,15 +384,15 @@ Output JSON: {
 
   const summary = synthParsed.summary || `Expanded branch for "${rootNode.label}" using web research.`;
 
-  const newTriples: RawExtractedTriple[] = (synthParsed.newRelationships || [])
+  const rawTriples: RawExtractedTriple[] = (synthParsed.newRelationships || [])
     .filter(r => r.subject && r.predicate && r.object)
     .map(r => {
       const sourceIdx = typeof r.sourceIndex === 'number' ? r.sourceIndex : 0;
       const matchedResult = allSearchResults[sourceIdx];
       return {
-        subject: String(r.subject),
-        predicate: String(r.predicate),
-        object: String(r.object),
+        subject: String(r.subject).trim(),
+        predicate: String(r.predicate).trim(),
+        object: String(r.object).trim(),
         subjectType: r.subjectType ? String(r.subjectType) : undefined,
         objectType: r.objectType ? String(r.objectType) : undefined,
         confidence: typeof r.confidence === 'number' ? Math.max(0, Math.min(1, r.confidence)) : 0.7,
@@ -355,6 +403,8 @@ Output JSON: {
         },
       };
     });
+
+  const newTriples = filterToConnectedTriples(rawTriples, rootNode.label);
 
   return {
     summary,
