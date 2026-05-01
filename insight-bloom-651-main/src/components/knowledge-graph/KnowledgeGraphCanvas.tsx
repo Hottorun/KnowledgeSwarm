@@ -641,12 +641,11 @@ function KnowledgeGraphCanvasInner() {
             setIsProcessing(false);
 
             if (!hadCommittedNodes) {
-              // Double-rAF: first fires after React's commit, second after the browser paints layout
-              requestAnimationFrame(() => {
-                requestAnimationFrame(() => {
-                  reactFlowInstance.fitView({ padding: 0.12, duration: 0 });
-                });
-              });
+              // Mark that an initial fit is needed; the useEffect tied to
+              // deferredNodes will perform it once React Flow has actually
+              // mounted/measured the new nodes (useDeferredValue can defer
+              // the render past any rAF here).
+              needsInitialFitRef.current = true;
             }
           });
         } else {
@@ -1540,6 +1539,21 @@ function KnowledgeGraphCanvasInner() {
   const deferredNodes = useDeferredValue(nodesWithHighlight);
   const deferredEdges = useDeferredValue(edges);
 
+  // Initial fitView must run AFTER React Flow has actually mounted+measured the
+  // deferred nodes — calling fitView from inside the layout debounce or rAF
+  // races the deferred render and ends up zooming to nothing.
+  const needsInitialFitRef = useRef(false);
+  useEffect(() => {
+    if (!needsInitialFitRef.current || deferredNodes.length === 0) return;
+    needsInitialFitRef.current = false;
+    // Wait two frames for React Flow internals to measure the new node DOM
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        reactFlowInstance.fitView({ padding: 0.25, duration: 400, maxZoom: 1.2, minZoom: 0.05 });
+      });
+    });
+  }, [deferredNodes, reactFlowInstance]);
+
   return (
     <div className="w-screen h-screen relative overflow-hidden" style={{ background: 'var(--kg-canvas)' }}>
       <TopNav
@@ -1577,7 +1591,8 @@ function KnowledgeGraphCanvasInner() {
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
         fitView
-        minZoom={0.2}
+        fitViewOptions={{ padding: 0.25, maxZoom: 1.2, minZoom: 0.05 }}
+        minZoom={0.05}
         maxZoom={2}
         proOptions={{ hideAttribution: true }}
         className="w-full h-full"
