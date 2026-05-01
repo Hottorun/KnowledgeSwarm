@@ -1066,25 +1066,8 @@ function KnowledgeGraphCanvasInner() {
       details:    `${detailsHint} for "${label}"${pathContext}.${rootContext}`,
     };
 
-    // Detect grouping intent: "find X", "list X", "similar X", "compare X", "show X"
-    const groupingPatterns = [
-      /^(?:find|list|show|get|give me|what are)\s+(?:some\s+)?(.+)/i,
-      /^similar\s+(.+)/i,
-      /^(.+)\s+similar\s+to/i,
-      /^compare\s+(.+)/i,
-    ];
-    let groupingHint = '';
-    for (const pat of groupingPatterns) {
-      const m = prompt.match(pat);
-      if (m) {
-        const rawTerm = m[1].trim().replace(/\b\w/g, c => c.toUpperCase());
-        groupingHint = `\n\nGROUPING INSTRUCTION: The user wants to group results into a list. You MUST create ONE intermediate category node (name it "${rawTerm}" or a concise variant) as a direct child of "${label}", then attach all individual items as children of THAT category node. The required chain is: "${label}" → [category node] → [individual items]. Do NOT attach individual items directly to "${label}".`;
-        break;
-      }
-    }
-
     const question = prompt
-      ? `${prompt} — specifically about "${label}"${pathContext}${groupingHint}`
+      ? `${prompt} — specifically about "${label}"${pathContext}`
       : defaultQuestions[action] ?? defaultQuestions.categories;
 
     setReasoningSteps(prev => [...prev, {

@@ -223,7 +223,6 @@ interface ExtractedItem {
   label: string;
   type: string;
   brief: string;
-  isCategory: boolean;   // grouping node — must connect to root
   exact_value: number | null;  // verbatim numeric value when item is quantitative
   unit: string | null;         // measurement unit (e.g. "billion USD", "%")
 }
@@ -307,7 +306,40 @@ Output JSON: { "queries": [string, string, ...] }`;
     throw new Error('No web search results returned. Configure TAVILY_API_KEY or BRAVE_SEARCH_API_KEY in .env');
   }
 
-  // ── PASS 1: Pure extraction — LLM only identifies WHAT exists, ignores all graph structure ──
+  // ── STEP 0: Intent classification — determines whether a category node is needed ──
+  // Runs only when the user typed an explicit question. Lightweight single-shot call.
+
+  let requiresCategory = false;
+  let categoryTitle: string | null = null;
+
+  if (userQuestionDriven) {
+    const classRaw = await callOpenAI(
+      [
+        {
+          role: 'system',
+          content: `You are a query classifier for a knowledge graph. Determine whether the user's query is asking for a GROUP, LIST, or PLURAL SET of items that should be organized under a named intermediate category node.
+
+requires_category: true examples — "find similar companies", "list pricing tiers", "what are the competitors", "show related products", "compare alternatives"
+requires_category: false examples — "who is the CEO", "when was it founded", "what is the revenue", "tell me about the history"
+
+Output JSON: { "requires_category": boolean, "category_title": string | null }
+category_title must be a concise, title-cased noun phrase (e.g. "Similar Companies", "Pricing Tiers"). null when requires_category is false.`,
+        },
+        {
+          role: 'user',
+          content: `Query: "${question}" — about node "${rootNode.label}" (${rootNode.type})`,
+        },
+      ],
+      { jsonMode: true, temperature: 0 }
+    );
+    const classParsed = JSON.parse(classRaw) as { requires_category?: boolean; category_title?: string | null };
+    requiresCategory = Boolean(classParsed.requires_category);
+    categoryTitle = requiresCategory && classParsed.category_title ? String(classParsed.category_title).trim() : null;
+  }
+
+  const categoryId = categoryTitle ? `category:${slugify(categoryTitle)}` : null;
+
+  // ── PASS 1: Pure extraction — LLM identifies WHAT exists, never touches graph structure ──
 
   const depthInstruction = userQuestionDriven
     ? `The user's question takes absolute priority. Extract exactly what it asks about at whatever specificity is required.`
@@ -320,19 +352,13 @@ If you cannot form a broad category, produce FEWER items rather than substitutin
         ? `Level 2 — extract named sub-entities: products, people, departments, markets. Avoid raw statistics.`
         : `Level ${graphDepth}+ — extract ATOMIC FACTS: exact numbers, specific names, concrete dates. Be granular, not generic.`;
 
-  // Detect grouping intent so Pass 1 knows to emit one category item first
-  const isGroupingQuestion = !!question?.match(/\b(?:find|list|show|similar|compare|get)\b/i);
-  const groupingNote = isGroupingQuestion
-    ? `\nGROUPING: The question asks for a list. Emit exactly ONE category node first (isCategory: true, label = the group name like "Similar Companies"), then the individual items (isCategory: false).`
-    : '';
-
   const allExistingLabels = [rootNode.label, ...nodes.map(n => n.label)];
 
   const pass1System = `You are a pure information extractor. Your ONLY job: read the web research and extract new information items.
 
 STRICT RULES:
-- Return a FLAT list of items — no hierarchy, no edges, no parent references, no graph structure
-- Do NOT think about how items connect to each other or to existing nodes
+- Return a FLAT list of leaf items only — no hierarchy, no edges, no parent references, no graph structure
+- Do NOT create category or grouping nodes — those are handled separately
 - Labels must be specific and human-readable, max 60 characters, no snake_case
 - Omit vague or generic items ("some facts", "various companies")
 - Type must be one of: Company, Person, Product, Market, Technology, Location, Concept, Entity
@@ -343,26 +369,19 @@ QUANTITATIVE DATA — NON-NEGOTIABLE:
 - If a number is ambiguous, set exact_value to null and unit to null. Do NOT guess.
 - exact_value: the raw numeric portion as a JSON number (e.g. 89.5). Scale factors (billion/million) go into unit.
 - unit: the full denomination string (e.g. "billion USD", "million employees", "%", "years").
-- A label approximating "$90B" when the source says "$89.5B" is a violation — use "$89.5B" verbatim.
 
 Output JSON:
 {
   "summary": "2-3 sentence summary of key findings about the target",
-  "items": [{
-    "label": string,
-    "type": string,
-    "brief": string,
-    "isCategory": boolean,
-    "exact_value": number | null,
-    "unit": string | null
-  }]
+  "items": [{ "label": string, "type": string, "brief": string, "exact_value": number | null, "unit": string | null }]
 }`;
 
   const pass1User = `TARGET: "${rootNode.label}" (${rootNode.type}) — ${depthLabel}
 LINEAGE: ${lineagePath}
 ${question ? `QUESTION: ${question}` : `GOAL: Find the key aspects and components of "${rootNode.label}"`}
+${categoryTitle ? `NOTE: A category node "${categoryTitle}" already exists — extract the individual items that belong INSIDE it.` : ''}
 
-DEPTH RULE: ${depthInstruction}${groupingNote}
+DEPTH RULE: ${depthInstruction}
 
 EXISTING LABELS (do NOT duplicate): ${allExistingLabels.join(', ')}
 
@@ -383,8 +402,6 @@ ${allWebContext.slice(0, 24).join('\n\n')}`;
       const exactValue = typeof i.exact_value === 'number' ? i.exact_value : null;
       const unit = typeof i.unit === 'string' && i.unit ? i.unit : null;
       let label = String(i.label).trim().slice(0, 60);
-      // If structured numeric fields are present and the label is missing the verbatim
-      // value, reconstruct it so the node accurately reflects the source data.
       if (exactValue !== null && unit !== null && !label.includes(String(exactValue))) {
         label = `${label}: ${exactValue} ${unit}`.slice(0, 60);
       }
@@ -393,7 +410,6 @@ ${allWebContext.slice(0, 24).join('\n\n')}`;
         label,
         type: String(i.type || 'Entity'),
         brief: String(i.brief || ''),
-        isCategory: Boolean(i.isCategory),
         exact_value: exactValue,
         unit,
       };
@@ -403,46 +419,43 @@ ${allWebContext.slice(0, 24).join('\n\n')}`;
     return { summary, newTriples: [], searchQueries, searchResultCount: allSearchResults.length };
   }
 
-  // ── PASS 2: Routing agent — assigns each extracted item to its correct parent ──
-  // Available parents: root node + existing context nodes + new category items from Pass 1.
-  // Category items route to root; individual items route to the best semantic match.
+  // ── PASS 2: Routing agent — assigns each item to its explicit parent ──────
+  // When requiresCategory: all items → categoryId (pre-created, not LLM-chosen).
+  // When !requiresCategory: items → best semantic match among root and existing nodes.
 
   const availableParents = [
-    { id: rootNode.id, label: rootNode.label, role: 'ROOT — always available' },
+    { id: rootNode.id, label: rootNode.label, role: 'ROOT' },
     ...nodes.map(n => ({ id: n.id, label: n.label, role: 'existing' })),
-    ...extractedItems
-      .filter(i => i.isCategory)
-      .map(i => ({ id: i.id, label: i.label, role: 'new category from Pass 1' })),
+    ...(categoryId && categoryTitle
+      ? [{ id: categoryId, label: categoryTitle, role: 'PRE-CREATED CATEGORY — route all items here' }]
+      : []),
   ];
 
-  const pass2System = `You are a graph routing agent. Your ONLY job: assign each new item to its correct parent node from the list provided.
+  const categoryDirective = categoryId && categoryTitle
+    ? `\nMANDATORY: A category node "${categoryTitle}" (ID: "${categoryId}") has been pre-created and linked to ROOT. You MUST set parentId to "${categoryId}" for every item — no exceptions. Do NOT route any item to ROOT directly.`
+    : '';
+
+  const pass2System = `You are a graph routing agent. Your ONLY job: assign each new item to its correct parent node.
 
 STRICT RULES:
 - Every item must connect to EXACTLY ONE parent from AVAILABLE PARENTS — no other IDs allowed
-- Category items (isCategory: true) MUST connect to the ROOT node ID
-- Individual items connect to the most semantically appropriate parent:
-  • Prefer new category nodes (from Pass 1) when the item clearly belongs to that group
-  • Prefer existing nodes when the item is a known attribute of that entity
-  • Fall back to ROOT only if no better parent exists
 - Predicates must be specific and meaningful: "includes", "founded_by", "has_ceo", "age", "located_in", "competes_with"
-- Never connect an item to itself
+- Never connect an item to itself${categoryDirective}
 
 Output JSON: { "connections": [{ "itemLabel": string, "parentId": string, "predicate": string, "confidence": number }] }`;
 
   const pass2User = `ROOT: "${rootNode.label}" (ID: "${rootNode.id}")
-${question ? `ORIGINAL QUESTION: ${question}` : ''}
+${question ? `QUESTION: ${question}` : ''}
 
-AVAILABLE PARENT NODES:
+AVAILABLE PARENTS:
 ${JSON.stringify(availableParents, null, 2)}
 
-NEW ITEMS TO CONNECT:
-${JSON.stringify(extractedItems.map(i => ({ id: i.id, label: i.label, type: i.type, brief: i.brief, isCategory: i.isCategory })), null, 2)}
-
-Route each item. Category items → ROOT. Individual items → best category or ROOT.`;
+ITEMS TO CONNECT:
+${JSON.stringify(extractedItems.map(i => ({ id: i.id, label: i.label, type: i.type, brief: i.brief })), null, 2)}`;
 
   const pass2Raw = await callOpenAI(
     [{ role: 'system', content: pass2System }, { role: 'user', content: pass2User }],
-    { model: 'gpt-4o-mini', jsonMode: true, temperature: 0.0 }
+    { model: 'gpt-4o-mini', jsonMode: true, temperature: 0 }
   );
 
   const pass2Parsed = JSON.parse(pass2Raw) as { connections?: Array<Record<string, unknown>> };
@@ -455,20 +468,21 @@ Route each item. Category items → ROOT. Individual items → best category or 
       confidence: typeof c.confidence === 'number' ? Math.max(0, Math.min(1, c.confidence)) : 0.7,
     }));
 
-  // ── Build triples from routing output ──────────────────────────────────────
+  // ── Build triples ──────────────────────────────────────────────────────────
 
-  // Map IDs (both backend IDs and temp "new:..." IDs) back to labels and types
   const idToLabel = new Map<string, string>();
   idToLabel.set(rootNode.id, rootNode.label);
   nodes.forEach(n => idToLabel.set(n.id, n.label));
   extractedItems.forEach(i => idToLabel.set(i.id, i.label));
+  if (categoryId && categoryTitle) idToLabel.set(categoryId, categoryTitle);
 
   const labelToType = new Map<string, string>();
   labelToType.set(rootNode.label.toLowerCase(), rootNode.type);
   nodes.forEach(n => labelToType.set(n.label.toLowerCase(), n.type));
   extractedItems.forEach(i => labelToType.set(i.label.toLowerCase(), i.type));
+  if (categoryTitle) labelToType.set(categoryTitle.toLowerCase(), 'Concept');
 
-  const rawTriples: RawExtractedTriple[] = connections
+  const connectionTriples: RawExtractedTriple[] = connections
     .filter(c => idToLabel.has(c.parentId))
     .map(c => {
       const parentLabel = idToLabel.get(c.parentId)!;
@@ -483,8 +497,19 @@ Route each item. Category items → ROOT. Individual items → best category or 
       };
     });
 
+  const categoryTriple: RawExtractedTriple[] = (categoryTitle && categoryId)
+    ? [{
+        subject: rootNode.label,
+        predicate: 'has_group',
+        object: categoryTitle,
+        subjectType: rootNode.type,
+        objectType: 'Concept',
+        confidence: 1.0,
+      }]
+    : [];
+
   const existingNodeLabels = nodes.map(n => n.label);
-  const newTriples = filterToConnectedTriples(rawTriples, rootNode.label, existingNodeLabels);
+  const newTriples = filterToConnectedTriples([...categoryTriple, ...connectionTriples], rootNode.label, existingNodeLabels);
 
   return {
     summary,
