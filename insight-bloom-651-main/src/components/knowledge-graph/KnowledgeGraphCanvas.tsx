@@ -467,6 +467,10 @@ function KnowledgeGraphCanvasInner() {
         [...pendingNodesRef.current.values()].find(n => n.id !== backendNode.id && n.data.label.toLowerCase().trim() === normalLabel);
       if (existingByLabel) {
         if (anchor) {
+          // Mark the reused node as "touched" so any chain edges originating from
+          // it (e.g. existing Tim Cook → age → new "63") aren't blocked by the
+          // anchor-scope filter in edge.created.
+          expansionNewNodesRef.current.add(existingByLabel.id);
           const reuseId = `e-reuse-${anchor.id}-${existingByLabel.id}`;
           setEdges(prev => prev.some(ex => ex.id === reuseId) ? prev : [...prev, {
             id: reuseId, source: anchor.id, target: existingByLabel.id,

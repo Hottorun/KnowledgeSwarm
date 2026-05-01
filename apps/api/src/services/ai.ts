@@ -150,70 +150,25 @@ export interface ExpandSubtreeResult {
   searchResultCount: number;
 }
 
-// When the LLM's own decomposition says the property OWNER is not the root,
-// reject any triple that jams the property directly onto the root node. The
-// model occasionally ignores Rule 0 even when it correctly fills out the
-// decomposition block, so this is the belt-and-suspenders enforcement.
-function enforceMultiHopChain(
-  triples: RawExtractedTriple[],
-  rootLabel: string,
-  decomp?: {
-    attribute?: string;
-    owner?: string;
-    ownerIsRoot?: boolean;
-    intermediateNeeded?: string | null;
-  },
-): RawExtractedTriple[] {
-  if (!decomp) return triples;
-  if (decomp.ownerIsRoot !== false) return triples;
-
-  const norm = (s: string) => s.toLowerCase().trim();
-  const root = norm(rootLabel);
-  const attribute = decomp.attribute ? norm(decomp.attribute) : '';
-  const owner = decomp.owner ? norm(decomp.owner) : '';
-  // Tokenize attribute into words ≥3 chars to match against snake_case predicates
-  const attrTokens = attribute
-    .split(/[\s_]+/)
-    .filter(t => t.length >= 3 && t !== 'the' && t !== 'and' && t !== 'for');
-  const ownerTokens = owner
-    .split(/[\s_]+/)
-    .filter(t => t.length >= 3 && t !== 'the' && t !== 'and' && t !== 'for');
-
-  return triples.filter(t => {
-    if (norm(t.subject) !== root) return true;
-    const predicate = norm(t.predicate);
-    const object = norm(t.object);
-    // If the root is the subject, the predicate must NOT contain attribute keywords
-    // unless the object is the intermediate (i.e. the chain root → owner).
-    const predicateMentionsAttribute = attrTokens.some(tok => predicate.includes(tok));
-    const predicateMentionsOwner = ownerTokens.some(tok => predicate.includes(tok));
-    const objectIsIntermediate = decomp.intermediateNeeded
-      ? object.includes(norm(decomp.intermediateNeeded))
-      : ownerTokens.some(tok => object.includes(tok));
-    // Drop: root → ceo_age → "47"  (predicate has both owner and attribute)
-    // Drop: root → has_ceo_age → "47"
-    // Drop: root → age → "47"      (predicate is the attribute itself)
-    // Keep: root → has_ceo → "Jane Smith"  (object is intermediate, predicate is just owner relation)
-    if (predicateMentionsAttribute && predicateMentionsOwner) return false;
-    if (predicateMentionsAttribute && !objectIsIntermediate) return false;
-    return true;
-  });
+// Stable lowercase slug — used as temp IDs for items created in Pass 1 so Pass 2 can
+// reference them as parent candidates before they have real backend IDs.
+function slugify(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'item';
 }
 
-// BFS over the LLM's new triples starting from rootLabel. Drops triples whose
-// endpoints can't be reached from the root through other new triples — this is
-// what kills orphan nodes that would otherwise float in the canvas with no edge
-// connecting them back to the user's clicked node.
+// BFS from rootLabel AND any already-in-graph node labels (they are reachable by
+// definition). Drops triples whose both endpoints can't be reached. Safety net
+// against orphan nodes even after two-pass routing.
 function filterToConnectedTriples(
   triples: RawExtractedTriple[],
   rootLabel: string,
+  existingNodeLabels: string[] = [],
 ): RawExtractedTriple[] {
   if (triples.length === 0) return triples;
 
   const norm = (s: string) => s.toLowerCase().trim();
-  const root = norm(rootLabel);
+  const reachable = new Set<string>([norm(rootLabel), ...existingNodeLabels.map(norm)]);
 
-  const reachable = new Set<string>([root]);
   let grew = true;
   while (grew) {
     grew = false;
@@ -228,23 +183,32 @@ function filterToConnectedTriples(
   return triples.filter(t => reachable.has(norm(t.subject)) && reachable.has(norm(t.object)));
 }
 
+// Internal types for the two-pass extraction architecture
+interface ExtractedItem {
+  id: string;       // temp ID: "new:<slug>"
+  label: string;
+  type: string;
+  brief: string;
+  isCategory: boolean;  // grouping node — must connect to root
+}
+
+interface ItemConnection {
+  itemLabel: string;
+  parentId: string;
+  predicate: string;
+  confidence: number;
+}
+
 export async function expandSubtree(input: ExpandSubtreeInput): Promise<ExpandSubtreeResult> {
-  const { rootNode, nodes, edges, question, parentNode, siblings = [], graphDepth = 0, globalBranches = [] } = input;
+  const { rootNode, nodes, question, parentNode, graphDepth = 0 } = input;
 
-  const edgeList = edges.map(e => `${e.subjectLabel} --[${e.predicate}]--> ${e.objectLabel}`).join('\n');
-
-  // Build lineage path for context
-  const lineagePath = parentNode
-    ? `${parentNode.label} → ${rootNode.label}`
-    : rootNode.label;
-
-  // Depth-appropriate instruction for query generation
+  const lineagePath = parentNode ? `${parentNode.label} → ${rootNode.label}` : rootNode.label;
   const depthLabel =
     graphDepth === 0 ? 'root entity'
     : graphDepth === 1 ? 'Level 1 pillar'
     : graphDepth === 2 ? 'Level 2 subdivision'
     : graphDepth === 3 ? 'Level 3 specific entity/fact'
-    : `Level ${graphDepth} fine-grained detail`;
+    : `Level ${graphDepth} deep detail`;
 
   const userQuestionDriven = !!question?.trim();
 
@@ -307,174 +271,158 @@ Output JSON: { "queries": [string, string, ...] }`;
     throw new Error('No web search results returned. Configure TAVILY_API_KEY or BRAVE_SEARCH_API_KEY in .env');
   }
 
-  // Step 3: AI synthesizes search results into new SPO triples using the 4-rule protocol
+  // ── PASS 1: Pure extraction — LLM only identifies WHAT exists, ignores all graph structure ──
+
+  const depthInstruction = userQuestionDriven
+    ? `The user's question takes absolute priority. Extract exactly what it asks about at whatever specificity is required.`
+    : graphDepth <= 1
+      ? `Level ${graphDepth} — extract BROAD CATEGORIES only. No named individuals, no statistics, no dates, no numbers.
+Good: "Financial Performance", "Leadership", "Product Strategy", "Market Position"
+Bad (forbidden): "$200B revenue", "Tim Cook", "iPhone 15", any specific name or number.
+If you cannot form a broad category, produce FEWER items rather than substituting a leaf fact.`
+      : graphDepth === 2
+        ? `Level 2 — extract named sub-entities: products, people, departments, markets. Avoid raw statistics.`
+        : `Level ${graphDepth}+ — extract ATOMIC FACTS: exact numbers, specific names, concrete dates. Be granular, not generic.`;
+
+  // Detect grouping intent so Pass 1 knows to emit one category item first
+  const isGroupingQuestion = !!question?.match(/\b(?:find|list|show|similar|compare|get)\b/i);
+  const groupingNote = isGroupingQuestion
+    ? `\nGROUPING: The question asks for a list. Emit exactly ONE category node first (isCategory: true, label = the group name like "Similar Companies"), then the individual items (isCategory: false).`
+    : '';
+
   const allExistingLabels = [rootNode.label, ...nodes.map(n => n.label)];
 
-  const depthRule = userQuestionDriven
-    ? `RULE 1 — QUESTION-DRIVEN (user override active):
-The user's question takes priority over abstraction defaults. Answer it directly with whatever specificity the question demands.
-Still: NO snake_case labels, NO vague category words. Every label must be a specific, human-readable phrase or fact (max 60 chars).`
-    : graphDepth <= 1
-      ? `RULE 1 — BREADTH-FIRST ABSTRACTION (Level ${graphDepth}) — STRICT:
-You MUST generate ONLY broad, abstract CATEGORY nodes. Leaf-level facts are FORBIDDEN at this level.
-GOOD: "Finances", "Product Lines", "Corporate Leadership", "Market Competition", "Brand Identity", "Manufacturing"
-BAD (will be REJECTED): "$4 trillion market cap", "Tim Cook is 62", "iPhone 15 Pro", any number, any specific date, any individual person's name, any product name.
-If you cannot think of an abstract category, output FEWER nodes — never substitute a leaf fact.`
-      : graphDepth === 2
-        ? `RULE 1 — NAMED SUB-DIVISIONS (Level 2):
-Generate named SUB-DIVISIONS and key entities within "${rootNode.label}". Named entities (people, products, markets, departments) are OK.
-Still avoid raw statistics, exact figures, and dates — save those for deeper levels.`
-        : graphDepth === 3
-          ? `RULE 1 — SPECIFICITY UNLOCKED (Level 3):
-You may now include specific facts, statistics, exact names, and data points.
-GOOD: "Revenue: $82.3B (Q3 2024)", "Led Vision Pro launch (2023)", "Holds 1M+ Apple shares"
-BAD: still forbidden: snake_case ("sales_decline"), generic categories ("revenue_figure").
-Max 60 characters per label.`
-          : `RULE 1 — DEEP DRILLDOWN (Level ${graphDepth}):
-You are deep in the graph — go MORE granular, not less. Atomic facts, micro-attributes, exact dates, unit-level details.
-GOOD: "Released Sept 12, 2023", "Battery: 3,279 mAh", "Manufactured at Foxconn Zhengzhou"
-BAD: anything generic. If you can't find truly atomic facts, return fewer nodes rather than padding with vague ones.
-Max 60 characters per label.`;
+  const pass1System = `You are a pure information extractor. Your ONLY job: read the web research and extract new information items.
 
-  const synthesisPrompt = `You are a structured Knowledge Graph Architect. Apply ALL rules below strictly.
+STRICT RULES:
+- Return a FLAT list of items — no hierarchy, no edges, no parent references, no graph structure
+- Do NOT think about how items connect to each other or to existing nodes
+- Labels must be specific and human-readable, max 60 characters, no snake_case
+- Omit vague or generic items ("some facts", "various companies")
+- Type must be one of: Company, Person, Product, Market, Technology, Location, Concept, Entity
+- Do NOT duplicate labels from the EXISTING list
 
-════════════════════════════════════════
-TARGET NODE: "${rootNode.label}" (${rootNode.type})
-LINEAGE PATH: ${lineagePath}
-GRAPH DEPTH: Level ${graphDepth}
-${parentNode ? `PARENT: "${parentNode.label}"` : ''}
-════════════════════════════════════════
+Output JSON:
+{
+  "summary": "2-3 sentence summary of key findings about the target",
+  "items": [{ "label": string, "type": string, "brief": string, "isCategory": boolean }]
+}`;
 
-SIBLINGS ALREADY ATTACHED TO PARENT (do NOT duplicate or overlap):
-${siblings.length > 0 ? siblings.map(s => `• ${s}`).join('\n') : '• None yet'}
+  const pass1User = `TARGET: "${rootNode.label}" (${rootNode.type}) — ${depthLabel}
+LINEAGE: ${lineagePath}
+${question ? `QUESTION: ${question}` : `GOAL: Find the key aspects and components of "${rootNode.label}"`}
 
-GLOBAL BRANCHES ALREADY IN GRAPH (do NOT duplicate):
-${globalBranches.length > 0 ? globalBranches.map(b => `• ${b}`).join('\n') : '• None yet'}
+DEPTH RULE: ${depthInstruction}${groupingNote}
 
-ALL EXISTING NODE LABELS (strict deduplication — reuse exact strings for these):
-${allExistingLabels.join(', ')}
+EXISTING LABELS (do NOT duplicate): ${allExistingLabels.join(', ')}
 
-EXISTING RELATIONSHIPS:
-${edgeList || 'None yet.'}
+WEB RESEARCH:
+${allWebContext.slice(0, 24).join('\n\n')}`;
 
-${question ? `USER QUESTION: ${question}` : `GOAL: Generate exactly 5 logical sub-nodes of "${rootNode.label}" following the protocol.`}
-
-WEB SEARCH RESULTS:
-${allWebContext.join('\n\n')}
-
-════ MANDATORY RULES ════
-
-RULE 0 — QUESTION DECOMPOSITION (DO THIS FIRST, MENTALLY):
-${userQuestionDriven
-  ? `Before generating any triples, decompose the user's question into:
-  (a) ATTRIBUTE — what is the user actually asking about? (e.g. "age", "salary", "release date", "founder")
-  (b) OWNER — which entity logically POSSESSES that attribute? (e.g. "the CEO", "the founder", "the iPhone 15")
-
-Then check: is the OWNER the same as "${rootNode.label}"?
-
-  • OWNER == "${rootNode.label}"  → attach the attribute directly to "${rootNode.label}".
-        Example: question "revenue in 2023" on root "Acme Corp"
-          OK:  Acme Corp --[revenue_2023]--> "$2.1B"
-
-  • OWNER != "${rootNode.label}"  → you MUST first create the OWNER as a child of "${rootNode.label}",
-        THEN attach the attribute to the OWNER. NEVER jam them into one predicate.
-
-        Example: question "age of the CEO" on root "Acme Corp"
-          REQUIRED CHAIN:
-            Acme Corp --[has_ceo]--> "Jane Smith"
-            "Jane Smith" --[age]--> "47"
-          STRICTLY FORBIDDEN — these will be REJECTED:
-            Acme Corp --[ceo_age]--> "47"
-            Acme Corp --[has_ceo_age]--> "47"
-            Acme Corp --[age_of_ceo]--> "47"
-            Acme Corp --[ceo_is_47]--> "47"
-
-  • If the OWNER already exists in ALL EXISTING NODE LABELS above, reuse that exact label string.
-  • Compound predicates (snake_case combining two concepts like "founder_age", "ceo_salary",
-    "product_release_date") are FORBIDDEN. Always split them into a chain.`
-  : `No user question — focus on generating direct sub-categories of "${rootNode.label}".`}
-
-${depthRule}
-
-RULE 2 — ANTI-DUPLICATION:
-• Do NOT create any node whose label overlaps (case-insensitive) with any sibling or global branch listed above.
-• If a concept already exists in the graph, reference it via an edge rather than creating a new node.
-
-RULE 3 — HIERARCHICAL CONTEXT:
-• Every new node must be a direct, logical sub-category or attribute of "${rootNode.label}" specifically.
-• Stay within the lineage: ${lineagePath}.
-• Do NOT revert to generic facts about the parent entity "${parentNode?.label ?? 'root'}".
-• Example: expanding "Corporate Leadership" under "Apple Inc" → generate "Board of Directors", "Executive Team", "Leadership History" — NOT "Apple Revenue" or "iPhone Sales".
-
-RULE 4 — REACHABLE FROM ROOT (no orphan triples):
-Every new node must be reachable from "${rootNode.label}" through a chain of new triples.
-• At least one triple MUST have "${rootNode.label}" exactly as subject.
-• Every other new node MUST be transitively reachable from "${rootNode.label}" via the new triples you generate.
-• Triples between two third-party entities that don't connect back to "${rootNode.label}" are FORBIDDEN — they will be dropped.
-• Before submitting, mentally trace: can I walk from "${rootNode.label}" to every new node using only new triples? If no → remove that triple.
-
-Also write a 2–3 sentence summary of the most important new findings specifically about "${rootNode.label}".
-
-You MUST output the questionDecomposition block FIRST. This forces you to think through the chain structure before writing triples. The block is mandatory whether or not the user asked a question.
-
-Output JSON: {
-  "questionDecomposition": {
-    "attribute": string,        // what the user asks about, or the broadest theme if no question (e.g. "categories of ${rootNode.label}")
-    "owner": string,            // who possesses the attribute — "${rootNode.label}" itself, or a sub-entity by name/role
-    "ownerIsRoot": boolean,     // true ⇔ owner === "${rootNode.label}"
-    "intermediateNeeded": string | null,  // if ownerIsRoot is false, the EXACT label of the intermediate node you will create (or reuse from the existing graph)
-    "plan": string              // 1 sentence: how the chain will look, e.g. "${rootNode.label} → has_ceo → 'Jane Smith' → age → '47'"
-  },
-  "summary": string,
-  "newRelationships": [
-    { "subject": string, "predicate": string, "object": string, "subjectType": string, "objectType": string, "confidence": number, "sourceIndex": number }
-  ]
-}
-
-Self-check before returning: if questionDecomposition.ownerIsRoot is false, then NO triple may have "${rootNode.label}" as subject AND the attribute keyword in the predicate — instead "${rootNode.label}" must be the subject of a triple whose object is the intermediateNeeded label.`;
-
-  const synthesisRaw = await callOpenAI(
-    [{ role: 'user', content: synthesisPrompt }],
-    { model: 'gpt-4o-mini', jsonMode: true, temperature: 0.1 }
+  const pass1Raw = await callOpenAI(
+    [{ role: 'system', content: pass1System }, { role: 'user', content: pass1User }],
+    { model: 'gpt-4o-mini', jsonMode: true, temperature: 0.2 }
   );
 
-  const synthParsed = JSON.parse(synthesisRaw) as {
-    summary?: string;
-    newRelationships?: Array<Record<string, unknown>>;
-    questionDecomposition?: {
-      attribute?: string;
-      owner?: string;
-      ownerIsRoot?: boolean;
-      intermediateNeeded?: string | null;
-      plan?: string;
-    };
-  };
+  const pass1Parsed = JSON.parse(pass1Raw) as { summary?: string; items?: Array<Record<string, unknown>> };
+  const summary = pass1Parsed.summary || `Expanded "${rootNode.label}".`;
 
-  const summary = synthParsed.summary || `Expanded branch for "${rootNode.label}" using web research.`;
-  const decomp = synthParsed.questionDecomposition;
+  const extractedItems: ExtractedItem[] = (pass1Parsed.items || [])
+    .filter(i => i.label && i.type)
+    .map(i => ({
+      id: `new:${slugify(String(i.label))}`,
+      label: String(i.label).trim().slice(0, 60),
+      type: String(i.type || 'Entity'),
+      brief: String(i.brief || ''),
+      isCategory: Boolean(i.isCategory),
+    }));
 
-  const rawTriples: RawExtractedTriple[] = (synthParsed.newRelationships || [])
-    .filter(r => r.subject && r.predicate && r.object)
-    .map(r => {
-      const sourceIdx = typeof r.sourceIndex === 'number' ? r.sourceIndex : 0;
-      const matchedResult = allSearchResults[sourceIdx];
+  if (extractedItems.length === 0) {
+    return { summary, newTriples: [], searchQueries, searchResultCount: allSearchResults.length };
+  }
+
+  // ── PASS 2: Routing agent — assigns each extracted item to its correct parent ──
+  // Available parents: root node + existing context nodes + new category items from Pass 1.
+  // Category items route to root; individual items route to the best semantic match.
+
+  const availableParents = [
+    { id: rootNode.id, label: rootNode.label, role: 'ROOT — always available' },
+    ...nodes.map(n => ({ id: n.id, label: n.label, role: 'existing' })),
+    ...extractedItems
+      .filter(i => i.isCategory)
+      .map(i => ({ id: i.id, label: i.label, role: 'new category from Pass 1' })),
+  ];
+
+  const pass2System = `You are a graph routing agent. Your ONLY job: assign each new item to its correct parent node from the list provided.
+
+STRICT RULES:
+- Every item must connect to EXACTLY ONE parent from AVAILABLE PARENTS — no other IDs allowed
+- Category items (isCategory: true) MUST connect to the ROOT node ID
+- Individual items connect to the most semantically appropriate parent:
+  • Prefer new category nodes (from Pass 1) when the item clearly belongs to that group
+  • Prefer existing nodes when the item is a known attribute of that entity
+  • Fall back to ROOT only if no better parent exists
+- Predicates must be specific and meaningful: "includes", "founded_by", "has_ceo", "age", "located_in", "competes_with"
+- Never connect an item to itself
+
+Output JSON: { "connections": [{ "itemLabel": string, "parentId": string, "predicate": string, "confidence": number }] }`;
+
+  const pass2User = `ROOT: "${rootNode.label}" (ID: "${rootNode.id}")
+${question ? `ORIGINAL QUESTION: ${question}` : ''}
+
+AVAILABLE PARENT NODES:
+${JSON.stringify(availableParents, null, 2)}
+
+NEW ITEMS TO CONNECT:
+${JSON.stringify(extractedItems.map(i => ({ id: i.id, label: i.label, type: i.type, brief: i.brief, isCategory: i.isCategory })), null, 2)}
+
+Route each item. Category items → ROOT. Individual items → best category or ROOT.`;
+
+  const pass2Raw = await callOpenAI(
+    [{ role: 'system', content: pass2System }, { role: 'user', content: pass2User }],
+    { model: 'gpt-4o-mini', jsonMode: true, temperature: 0.0 }
+  );
+
+  const pass2Parsed = JSON.parse(pass2Raw) as { connections?: Array<Record<string, unknown>> };
+  const connections: ItemConnection[] = (pass2Parsed.connections || [])
+    .filter(c => c.itemLabel && c.parentId)
+    .map(c => ({
+      itemLabel: String(c.itemLabel),
+      parentId: String(c.parentId),
+      predicate: String(c.predicate || 'relates_to'),
+      confidence: typeof c.confidence === 'number' ? Math.max(0, Math.min(1, c.confidence)) : 0.7,
+    }));
+
+  // ── Build triples from routing output ──────────────────────────────────────
+
+  // Map IDs (both backend IDs and temp "new:..." IDs) back to labels and types
+  const idToLabel = new Map<string, string>();
+  idToLabel.set(rootNode.id, rootNode.label);
+  nodes.forEach(n => idToLabel.set(n.id, n.label));
+  extractedItems.forEach(i => idToLabel.set(i.id, i.label));
+
+  const labelToType = new Map<string, string>();
+  labelToType.set(rootNode.label.toLowerCase(), rootNode.type);
+  nodes.forEach(n => labelToType.set(n.label.toLowerCase(), n.type));
+  extractedItems.forEach(i => labelToType.set(i.label.toLowerCase(), i.type));
+
+  const rawTriples: RawExtractedTriple[] = connections
+    .filter(c => idToLabel.has(c.parentId))
+    .map(c => {
+      const parentLabel = idToLabel.get(c.parentId)!;
+      const item = extractedItems.find(i => i.label === c.itemLabel);
       return {
-        subject: String(r.subject).trim(),
-        predicate: String(r.predicate).trim(),
-        object: String(r.object).trim(),
-        subjectType: r.subjectType ? String(r.subjectType) : undefined,
-        objectType: r.objectType ? String(r.objectType) : undefined,
-        confidence: typeof r.confidence === 'number' ? Math.max(0, Math.min(1, r.confidence)) : 0.7,
-        source: {
-          url: matchedResult?.url,
-          title: matchedResult?.title,
-          snippet: matchedResult?.snippet,
-        },
+        subject: parentLabel,
+        predicate: c.predicate,
+        object: c.itemLabel,
+        subjectType: labelToType.get(parentLabel.toLowerCase()) ?? 'Entity',
+        objectType: item?.type ?? 'Entity',
+        confidence: c.confidence,
       };
     });
 
-  const cleanedTriples = enforceMultiHopChain(rawTriples, rootNode.label, decomp);
-  const newTriples = filterToConnectedTriples(cleanedTriples, rootNode.label);
+  const existingNodeLabels = nodes.map(n => n.label);
+  const newTriples = filterToConnectedTriples(rawTriples, rootNode.label, existingNodeLabels);
 
   return {
     summary,
