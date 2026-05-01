@@ -172,17 +172,29 @@ function GraphNodeComponent({ data, selected }: NodeProps) {
             transition={{ duration: 0.35, ease: 'easeOut' }}
             style={{
               position: 'absolute',
-              inset: 0,
               zIndex: 0,
               pointerEvents: 'none',
               background: 'transparent',
-              borderRadius: dims.r,
+              ...(isCompact
+                ? {
+                    width: dims.dot,
+                    height: dims.dot,
+                    top: '50%',
+                    left: '50%',
+                    transform: 'translate(-50%, -50%)',
+                    borderRadius: '50%',
+                  }
+                : {
+                    inset: 0,
+                    borderRadius: dims.r,
+                  }),
               boxShadow: [
                 `0 0 18px 8px ${dot.replace(')', ' / 50%)')}`,
                 `0 0 40px 18px ${dot.replace(')', ' / 30%)')}`,
                 `0 0 70px 30px ${dot.replace(')', ' / 15%)')}`,
               ].join(', '),
               animation: 'blob-pulse 2s ease-in-out infinite',
+              transition: 'border-radius 0.18s ease, width 0.18s ease, height 0.18s ease',
             }}
           />
         )}
