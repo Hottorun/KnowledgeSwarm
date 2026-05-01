@@ -339,7 +339,12 @@ function KnowledgeGraphCanvasInner() {
   const pendingEdgesRef = useRef<Map<string, Edge>>(new Map());
   // Undo history — snapshots of {nodes, edges} before each expansion/deletion
   const historyRef = useRef<Array<{ nodes: Node[]; edges: Edge[] }>>([]);
+  const redoStackRef = useRef<Array<{ nodes: Node[]; edges: Edge[] }>>([]);
   const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
+  // Nodes created during the CURRENT expansion task — chain edges (new node →
+  // newer node) need this set to survive the anchor-scope filter in edge.created.
+  const expansionNewNodesRef = useRef<Set<string>>(new Set());
 
   useOnViewportChange({
     onChange: useCallback((vp: { x: number; y: number; zoom: number }) => {
@@ -481,6 +486,10 @@ function KnowledgeGraphCanvasInner() {
       };
 
       if (anchor) {
+        // Track this node so chain edges (newNode → newerNode) survive the
+        // anchor-scope filter in edge.created — without this, intermediate
+        // category nodes would never get their child items attached.
+        expansionNewNodesRef.current.add(backendNode.id);
         // Expansion: commit immediately so the user sees progress
         setNodes(prev => prev.some(n => n.id === backendNode.id) ? prev : [...prev, newNode]);
         const bridgeEdgeId = `e-expand-${anchor.id}-${backendNode.id}`;
@@ -542,7 +551,15 @@ function KnowledgeGraphCanvasInner() {
         pendingNodesRef.current.has(backendEdge.target);
 
       if (!sourceInGraph && !targetInGraph) return;
-      if (anchor && sourceInGraph && backendEdge.source !== anchor.id) return;
+      // During expansion, allow edges from the anchor OR any node we just
+      // created in this expansion (chain support). Reject edges that try to
+      // reach into other branches (other pre-existing non-anchor nodes).
+      if (
+        anchor &&
+        sourceInGraph &&
+        backendEdge.source !== anchor.id &&
+        !expansionNewNodesRef.current.has(backendEdge.source)
+      ) return;
 
       // Reposition a placeholder target now that its real source is known
       const newPos = assignChildPosition(backendEdge.source, backendEdge.target);
@@ -561,9 +578,12 @@ function KnowledgeGraphCanvasInner() {
       if (anchor) {
         setEdges(prev => {
           if (prev.some(edge => edge.id === edgeId)) return prev;
-          const filtered = edgeSource === anchor.id
-            ? prev.filter(ex => ex.id !== `e-expand-${anchor.id}-${backendEdge.target}`)
-            : prev;
+          // Drop the placeholder bridge for this target whenever ANY real edge
+          // arrives — including chain edges from a newly-created intermediate.
+          // Otherwise items like "Microsoft" end up with two parents:
+          //   anchor --[expands]--> Microsoft  (placeholder)
+          //   "Similar Companies" --[includes]--> Microsoft  (real chain)
+          const filtered = prev.filter(ex => ex.id !== `e-expand-${anchor.id}-${backendEdge.target}`);
           return [...filtered, {
             id: edgeId, source: edgeSource, target: backendEdge.target,
             label: backendEdge.predicate, type: 'floating',
@@ -626,7 +646,10 @@ function KnowledgeGraphCanvasInner() {
     expansionRunningRef.current = false;
     setQueuedExpansions(0);
     historyRef.current = [];
+    redoStackRef.current = [];
+    expansionNewNodesRef.current.clear();
     setCanUndo(false);
+    setCanRedo(false);
     setNodes([]);
     setEdges([]);
     setReasoningSteps([]);
@@ -760,14 +783,37 @@ function KnowledgeGraphCanvasInner() {
       ...historyRef.current,
     ].slice(0, 20);
     setCanUndo(true);
+    // Any new mutation invalidates the redo stack
+    redoStackRef.current = [];
+    setCanRedo(false);
   }, []);
 
   const handleUndo = useCallback(() => {
     const prev = historyRef.current.shift();
     if (!prev) return;
+    redoStackRef.current = [
+      { nodes: [...nodesRef.current], edges: [...edgesRef.current] },
+      ...redoStackRef.current,
+    ].slice(0, 20);
+    setCanRedo(true);
     setNodes(prev.nodes);
     setEdges(prev.edges);
     setCanUndo(historyRef.current.length > 0);
+    setSelectedNode(null);
+    setInputBoxPos(null);
+  }, [setNodes, setEdges]);
+
+  const handleRedo = useCallback(() => {
+    const next = redoStackRef.current.shift();
+    if (!next) return;
+    historyRef.current = [
+      { nodes: [...nodesRef.current], edges: [...edgesRef.current] },
+      ...historyRef.current,
+    ].slice(0, 20);
+    setCanUndo(true);
+    setNodes(next.nodes);
+    setEdges(next.edges);
+    setCanRedo(redoStackRef.current.length > 0);
     setSelectedNode(null);
     setInputBoxPos(null);
   }, [setNodes, setEdges]);
@@ -798,17 +844,23 @@ function KnowledgeGraphCanvasInner() {
     setInputBoxPos(null);
   }, [selectedNode, pushHistory, setNodes, setEdges]);
 
-  // Ctrl+Z / Cmd+Z → undo
+  // Ctrl/Cmd+Z → undo, Ctrl/Cmd+Y or Ctrl/Cmd+Shift+Z → redo
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
+      const meta = e.metaKey || e.ctrlKey;
+      if (!meta) return;
+      const key = e.key.toLowerCase();
+      if (key === 'z' && !e.shiftKey) {
         e.preventDefault();
         handleUndo();
+      } else if (key === 'y' || (key === 'z' && e.shiftKey)) {
+        e.preventDefault();
+        handleRedo();
       }
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [handleUndo]);
+  }, [handleUndo, handleRedo]);
 
   const handleNodeAction = useCallback(async (action: string, prompt: string) => {
     if (!selectedNode) return;
@@ -960,10 +1012,29 @@ function KnowledgeGraphCanvasInner() {
     };
 
     const label = nodeData.label;
+    const entityType = nodeData.description ?? '';
+    const rootLabel = rootNodeInGraph ? (rootNodeInGraph.data as GraphNodeData).label : null;
+    const rootContext = rootLabel && rootLabel !== label ? ` Frame the answer specifically in the context of "${rootLabel}".` : '';
     const pathContext = breadcrumb.length > 1 ? ` (context path: ${contextPath})` : '';
+
+    // "Details" should answer "what is this / who is this" with attributes that
+    // make sense for the entity type — biographical for People, key facts for
+    // Companies, etc — always framed in context of the root.
+    const detailHints: Record<string, string> = {
+      Person:     `who is this — biographical and contextual info: full name, age or birth year, birthplace, education, current role, key achievements, notable affiliations`,
+      Company:    `what is this — key facts: founding year, headquarters, sector, revenue/size, key products, leadership, market position`,
+      Product:    `what is this — specs and key facts: release date, manufacturer, price, key features, target users, generation/version`,
+      Market:     `what is this — size, growth rate, key players, major segments, recent trends`,
+      Technology: `what is this — concise definition, key applications, history, major implementations, current state of the art`,
+      Location:   `what is this — type (city/country/region), population, significance, notable features`,
+      Document:   `what is this — author, publication date, type, main subject, key claims`,
+      Concept:    `what is this — definition, origin, key proponents, main applications`,
+    };
+    const detailsHint = detailHints[entityType] || `key facts and attributes about what this is`;
+
     const defaultQuestions: Record<string, string> = {
       categories: `Generate 5 broad sub-categories of "${label}"${pathContext}. Stay abstract — no specific facts, numbers, dates, or individual names. Categories only.`,
-      details:    `Find specific facts, statistics, key names, and concrete data points about "${label}"${pathContext}.`,
+      details:    `${detailsHint} for "${label}"${pathContext}.${rootContext}`,
     };
 
     // Detect grouping intent: "find X", "list X", "similar X", "compare X", "show X"
@@ -1000,6 +1071,8 @@ function KnowledgeGraphCanvasInner() {
       expansionAnchorRef.current = { id: selectedNodeId, pos: selectedNodePos };
       expansionChildIdxRef.current = childIdxAtClick;
       expansionDepthRef.current = depthAtClick;
+      // Reset the per-task new-nodes set so chain-edge filter starts clean
+      expansionNewNodesRef.current = new Set();
       // Snapshot before any expansion mutates state so the user can undo it
       pushHistory();
       setExpandingNodeId(selectedNodeId);
@@ -1209,28 +1282,55 @@ function KnowledgeGraphCanvasInner() {
         )}
       </AnimatePresence>
 
-      {/* Undo button — floats bottom-left when history is available */}
-      <AnimatePresence>
-        {canUndo && !isEmpty && (
-          <motion.button
-            initial={{ opacity: 0, x: -8 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: -8 }}
-            transition={{ duration: 0.18 }}
-            onClick={handleUndo}
-            title="Undo last change (⌘Z)"
-            className="fixed bottom-20 left-4 z-30 px-3 py-1.5 rounded-full text-xs font-medium flex items-center gap-1.5 transition-colors hover:bg-accent"
-            style={{
-              background: 'var(--kg-node-bg)',
-              border: '1px solid var(--kg-node-border)',
-              boxShadow: 'var(--kg-shadow-md)',
-              color: 'var(--foreground)',
-            }}
-          >
-            ↩ Undo
-          </motion.button>
-        )}
-      </AnimatePresence>
+      {/* Undo / Redo — floats bottom-left when history is available */}
+      {!isEmpty && (canUndo || canRedo) && (
+        <div className="fixed bottom-20 left-4 z-30 flex items-center gap-2">
+          <AnimatePresence>
+            {canUndo && (
+              <motion.button
+                key="undo"
+                initial={{ opacity: 0, x: -8 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -8 }}
+                transition={{ duration: 0.18 }}
+                onClick={handleUndo}
+                title="Undo last change (⌘Z / Ctrl+Z)"
+                className="px-3 py-1.5 rounded-full text-xs font-medium flex items-center gap-1.5 transition-colors hover:bg-accent"
+                style={{
+                  background: 'var(--kg-node-bg)',
+                  border: '1px solid var(--kg-node-border)',
+                  boxShadow: 'var(--kg-shadow-md)',
+                  color: 'var(--foreground)',
+                }}
+              >
+                ↩ Undo
+              </motion.button>
+            )}
+          </AnimatePresence>
+          <AnimatePresence>
+            {canRedo && (
+              <motion.button
+                key="redo"
+                initial={{ opacity: 0, x: -8 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -8 }}
+                transition={{ duration: 0.18 }}
+                onClick={handleRedo}
+                title="Redo (⌘Y / Ctrl+Y)"
+                className="px-3 py-1.5 rounded-full text-xs font-medium flex items-center gap-1.5 transition-colors hover:bg-accent"
+                style={{
+                  background: 'var(--kg-node-bg)',
+                  border: '1px solid var(--kg-node-border)',
+                  boxShadow: 'var(--kg-shadow-md)',
+                  color: 'var(--foreground)',
+                }}
+              >
+                ↪ Redo
+              </motion.button>
+            )}
+          </AnimatePresence>
+        </div>
+      )}
 
       {/* Side panels */}
       <SidePanel side="left" isOpen={leftPanel} onClose={() => setLeftPanel(false)} nodes={nodes} edges={edges} onNodeFocus={handleNodeFocus} />
