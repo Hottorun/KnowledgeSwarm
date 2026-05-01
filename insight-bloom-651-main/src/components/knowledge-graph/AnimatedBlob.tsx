@@ -1,5 +1,6 @@
 import { motion, AnimatePresence } from 'framer-motion';
 import { useState, useCallback, useRef } from 'react';
+import type { AIReasoningStep } from './types';
 
 interface AnimatedBlobProps {
   onDataSubmit: (text: string, documentName?: string) => void | Promise<void>;
@@ -88,12 +89,12 @@ export function AnimatedBlob({ onDataSubmit, isDissolving }: AnimatedBlobProps) 
       initial={{ opacity: 0, scale: 0.8 }}
       animate={{ opacity: 1, scale: 1 }}
       transition={{ duration: 0.6, ease: 'easeOut' }}
+      onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
+      onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setIsDragOver(false); }}
+      onDrop={handleDrop}
     >
       <div
         className="relative flex flex-col items-center gap-6 cursor-pointer"
-        onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
-        onDragLeave={() => setIsDragOver(false)}
-        onDrop={handleDrop}
         onClick={() => fileInputRef.current?.click()}
       >
         <motion.div
@@ -143,9 +144,12 @@ export function AnimatedBlob({ onDataSubmit, isDissolving }: AnimatedBlobProps) 
 
 interface LoadingBlobProps {
   isVisible: boolean;
+  reasoningSteps?: AIReasoningStep[];
 }
 
-export function LoadingBlob({ isVisible }: LoadingBlobProps) {
+export function LoadingBlob({ isVisible, reasoningSteps = [] }: LoadingBlobProps) {
+  const lastStep = reasoningSteps[reasoningSteps.length - 1];
+
   return (
     <AnimatePresence>
       {isVisible && (
@@ -157,15 +161,32 @@ export function LoadingBlob({ isVisible }: LoadingBlobProps) {
           transition={{ duration: 0.4, ease: 'easeOut' }}
         >
           <BlobShell>
-            <motion.p
-              className="relative z-10 text-sm font-semibold"
-              style={{ color: 'white', textShadow: '0 1px 4px rgba(0,0,0,0.25)' }}
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.2, duration: 0.4 }}
-            >
-              Building knowledge graph…
-            </motion.p>
+            <div className="relative z-10 text-center px-8 flex flex-col items-center gap-1">
+              <motion.p
+                className="text-sm font-semibold"
+                style={{ color: 'white', textShadow: '0 1px 4px rgba(0,0,0,0.25)' }}
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.2, duration: 0.4 }}
+              >
+                Building knowledge graph…
+              </motion.p>
+              <AnimatePresence mode="wait">
+                {lastStep && (
+                  <motion.p
+                    key={lastStep.id}
+                    className="text-xs font-semibold opacity-80"
+                    style={{ color: 'white', textShadow: '0 1px 4px rgba(0,0,0,0.25)' }}
+                    initial={{ opacity: 0, y: 4 }}
+                    animate={{ opacity: 0.8, y: 0 }}
+                    exit={{ opacity: 0, y: -4 }}
+                    transition={{ duration: 0.3 }}
+                  >
+                    {lastStep.text}
+                  </motion.p>
+                )}
+              </AnimatePresence>
+            </div>
           </BlobShell>
         </motion.div>
       )}

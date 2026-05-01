@@ -1,4 +1,5 @@
 import { type EdgeProps, Position, getBezierPath, useInternalNode } from '@xyflow/react';
+import { motion } from 'framer-motion';
 
 const compactDotSize: Record<string, number> = { root: 36, topic: 28, subtopic: 22, detail: 18 };
 
@@ -36,7 +37,7 @@ function getHandlePosition(center: { x: number; y: number; w: number; h: number 
   return { x: center.x, y: center.y - center.h / 2, pos: 'top' as const };
 }
 
-export function FloatingEdge({ id, source, target, style, markerEnd }: EdgeProps) {
+export function FloatingEdge({ id, source, target, style, markerEnd, data }: EdgeProps) {
   const sourceNode = useInternalNode(source);
   const targetNode = useInternalNode(target);
 
@@ -58,14 +59,22 @@ export function FloatingEdge({ id, source, target, style, markerEnd }: EdgeProps
     curvature: 0.25,
   });
 
+  const animDelay = (data as any)?.animDelay ?? 0;
+
   return (
-    <path
+    <motion.path
       id={id}
       d={path}
       fill="none"
       stroke="var(--kg-edge)"
       strokeWidth={1.2}
-      strokeOpacity={0.5}
+      strokeLinecap="round"
+      initial={{ pathLength: 0, opacity: 0 }}
+      animate={{ pathLength: 1, opacity: 0.5 }}
+      transition={{
+        pathLength: { duration: 0.75, delay: animDelay, ease: [0.25, 0.46, 0.45, 0.94] },
+        opacity: { duration: 0.18, delay: animDelay },
+      }}
       style={style}
       markerEnd={markerEnd as string}
     />

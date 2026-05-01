@@ -244,9 +244,11 @@ function computeNodeDepth(nodeId: string, edgeList: Edge[]): number {
   return depth;
 }
 
-// BFS from root → assign animDelay (seconds) per node so center fades in first.
-// Total animation ≤ 2s: stepMs = min(300, 2000 / maxDepth).
-function assignAnimDelays(nodes: Node[], edges: Edge[]): Node[] {
+// BFS from root → assign animDelay (seconds) per node/edge so center renders first.
+// Stagger: stepMs = min(400, 2000 / maxDepth) — total animation ≤ 2s for deep graphs,
+// up to 400ms/layer for shallow ones giving a premium 600-1200ms per-layer feel.
+// Edges fire 180ms after their source node so they "draw out" from an appearing node.
+function assignAnimDelays(nodes: Node[], edges: Edge[]): { nodes: Node[]; edges: Edge[] } {
   const rootNode = nodes.find(n => (n.data as { nodeType?: string }).nodeType === 'root');
   const depthMap = new Map<string, number>();
 
@@ -266,16 +268,21 @@ function assignAnimDelays(nodes: Node[], edges: Edge[]): Node[] {
   }
 
   const maxDepth = depthMap.size > 0 ? Math.max(...depthMap.values()) : 0;
-  // Nodes unreachable from root get the last wave
   nodes.forEach(n => { if (!depthMap.has(n.id)) depthMap.set(n.id, maxDepth); });
 
   const effectiveMax = Math.max(...depthMap.values(), 1);
-  const stepMs = Math.min(300, 2000 / effectiveMax);
+  const stepMs = Math.min(600, 3000 / effectiveMax);
 
-  return nodes.map(n => ({
-    ...n,
-    data: { ...n.data, animDelay: (depthMap.get(n.id) ?? 0) * stepMs / 1000 },
-  }));
+  return {
+    nodes: nodes.map(n => ({
+      ...n,
+      data: { ...n.data, animDelay: (depthMap.get(n.id) ?? 0) * stepMs / 1000 },
+    })),
+    edges: edges.map(e => ({
+      ...e,
+      data: { ...(e.data ?? {}), animDelay: (depthMap.get(e.source) ?? 0) * stepMs / 1000 + 0.18 },
+    })),
+  };
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
@@ -484,14 +491,15 @@ function KnowledgeGraphCanvasInner() {
             userMovedRef.current,
           ) as Node[];
 
-          setNodes(assignAnimDelays(laidOut, allEdges));
-          setEdges(allEdges);
+          const animated = assignAnimDelays(laidOut, allEdges);
+          setNodes(animated.nodes);
+          setEdges(animated.edges);
           setIsProcessing(false);
 
           // Double-rAF: first fires after React's commit, second after the browser paints layout
           requestAnimationFrame(() => {
             requestAnimationFrame(() => {
-              reactFlowInstance.fitView({ padding: 0.12, duration: 700 });
+              reactFlowInstance.fitView({ padding: 0.12, duration: 0 });
             });
           });
         } else {
@@ -1026,7 +1034,7 @@ function KnowledgeGraphCanvasInner() {
       )}
 
       {/* Loading blob — shown from submit until first node arrives */}
-      <LoadingBlob isVisible={isProcessing} />
+      <LoadingBlob isVisible={isProcessing} reasoningSteps={reasoningSteps} />
 
       {/* Node input box */}
       <AnimatePresence>

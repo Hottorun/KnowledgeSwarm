@@ -94,6 +94,7 @@ function getAccent(description?: string): AccentColor {
 
 function GraphNodeComponent({ data, selected }: NodeProps) {
   const nodeData = data as unknown as GraphNodeData;
+  const isRoot = nodeData.nodeType === 'root';
   const style = typeStyles[nodeData.nodeType] || typeStyles.detail;
   const hasBadge = !!nodeData.description;
   const dims = calcNodeDims(nodeData.nodeType, nodeData.label, nodeData.description, hasBadge);
@@ -142,9 +143,20 @@ function GraphNodeComponent({ data, selected }: NodeProps) {
       <Handle type="target" position={Position.Right} id="right-t" className="!bg-transparent !w-1 !h-1 !border-none !right-0 !top-1/2 !-translate-y-1/2" />
 
       <motion.div
-        initial={{ opacity: 0, scale: 0.78 }}
-        animate={{ opacity: 1, scale: 1 }}
-        transition={{ duration: 0.38, delay: nodeData.animDelay ?? 0, ease: [0.16, 1, 0.3, 1] }}
+        initial={{ opacity: 0, scale: isRoot ? 0.72 : 0.6, y: isRoot ? 0 : 8 }}
+        animate={isRoot
+          ? { opacity: 1, scale: [0.72, 1.12, 0.96, 1] as number[], y: 0 }
+          : { opacity: 1, scale: 1, y: 0 }
+        }
+        transition={isRoot ? {
+          opacity: { duration: 0.6, delay: 0 },
+          scale: { duration: 1.8, delay: 0, times: [0, 0.42, 0.7, 1], ease: 'easeOut' },
+          y: { duration: 0.7, delay: 0 },
+        } : {
+          duration: 1.4,
+          delay: nodeData.animDelay ?? 0,
+          ease: [0.34, 1.56, 0.64, 1],
+        }}
         style={{ position: 'absolute', inset: 0 }}
       >
 
