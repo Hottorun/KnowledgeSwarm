@@ -85,6 +85,41 @@ export async function extractFromFile(runId: string, file: File): Promise<void> 
   return extractFromText(runId, text, file.name);
 }
 
+export async function checkMcpHealth(): Promise<boolean> {
+  try {
+    const res = await fetch(`${API_BASE}/mcp/health`);
+    if (!res.ok) return false;
+    const data = await res.json() as { ok: boolean };
+    return data.ok === true;
+  } catch {
+    return false;
+  }
+}
+
+export async function mcpListDirectory(path: string): Promise<string> {
+  const res = await fetch(`${API_BASE}/mcp/list-directory`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  });
+  if (!res.ok) throw new Error('Failed to list MCP directory');
+  const data = await res.json() as { content?: Array<{ text: string }> };
+  return data.content?.map(c => c.text).join('\n') ?? '';
+}
+
+export async function mcpReadFile(path: string): Promise<string> {
+  const res = await fetch(`${API_BASE}/mcp/read-file`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  });
+  if (!res.ok) throw new Error(`Failed to read file: ${path}`);
+  const data = await res.json() as { content?: Array<{ text: string }> };
+  return data.content?.map(c => c.text).join('') ?? '';
+}
+
+export const MCP_CONNECTOR_URL = `${API_BASE}/downloads/knowledge-swarm-connector.zip`;
+
 export interface SubtreeNode {
   id: string;
   label: string;

@@ -1,6 +1,9 @@
 import { motion, AnimatePresence } from 'framer-motion';
 import { useState, useCallback, useRef } from 'react';
 import type { AIReasoningStep } from './types';
+import { checkMcpHealth, mcpListDirectory, mcpReadFile, MCP_CONNECTOR_URL } from '@/lib/api';
+
+const READABLE_EXTENSIONS = /\.(txt|md|csv|json)$/i;
 
 interface AnimatedBlobProps {
   onDataSubmit: (text: string, documentName?: string) => void | Promise<void>;
@@ -33,9 +36,14 @@ function BlobShell({ children }: { children?: React.ReactNode }) {
   );
 }
 
+type McpStatus = 'idle' | 'checking' | 'reading' | 'error';
+
 export function AnimatedBlob({ onDataSubmit, isDissolving }: AnimatedBlobProps) {
   const [isDragOver, setIsDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [mcpPath, setMcpPath] = useState('');
+  const [mcpStatus, setMcpStatus] = useState<McpStatus>('idle');
+  const [mcpError, setMcpError] = useState('');
 
   const handleFiles = useCallback(async (files: File[]) => {
     const accepted = files.filter(f => /\.(txt|md|csv|json)$/i.test(f.name));
@@ -63,6 +71,53 @@ export function AnimatedBlob({ onDataSubmit, isDissolving }: AnimatedBlobProps) 
       await onDataSubmit(text);
     }
   }, [handleFiles, onDataSubmit]);
+
+  const handleMcpConnect = useCallback(async () => {
+    const path = mcpPath.trim();
+    if (!path) return;
+    setMcpStatus('checking');
+    setMcpError('');
+
+    try {
+      const healthy = await checkMcpHealth();
+      if (!healthy) {
+        setMcpStatus('error');
+        setMcpError('MCP bridge not reachable. Start the connector first.');
+        return;
+      }
+
+      setMcpStatus('reading');
+      const listing = await mcpListDirectory(path);
+
+      // Parse file paths from the listing text
+      const filePaths = listing
+        .split('\n')
+        .map(line => line.trim())
+        .filter(line => READABLE_EXTENSIONS.test(line))
+        .map(line => {
+          // Some MCP bridges return just filenames, others return full paths
+          return line.startsWith('/') ? line : `${path.replace(/\/$/, '')}/${line}`;
+        });
+
+      if (filePaths.length === 0) {
+        setMcpStatus('error');
+        setMcpError('No readable files found (.txt, .md, .csv, .json).');
+        return;
+      }
+
+      const contents = await Promise.all(
+        filePaths.map(async fp => ({ name: fp.split('/').pop() ?? fp, text: await mcpReadFile(fp) }))
+      );
+
+      await onDataSubmit(
+        contents.map(f => `--- ${f.name} ---\n${f.text}`).join('\n\n'),
+        contents.map(f => f.name).join(', '),
+      );
+    } catch (err) {
+      setMcpStatus('error');
+      setMcpError(err instanceof Error ? err.message : 'Connection failed.');
+    }
+  }, [mcpPath, onDataSubmit]);
 
   if (isDissolving) {
     return (
@@ -93,50 +148,125 @@ export function AnimatedBlob({ onDataSubmit, isDissolving }: AnimatedBlobProps) 
       onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setIsDragOver(false); }}
       onDrop={handleDrop}
     >
-      <div
-        className="relative flex flex-col items-center gap-6 cursor-pointer"
-        onClick={() => fileInputRef.current?.click()}
-      >
-        <motion.div
-          animate={{ scale: isDragOver ? 1.1 : 1 }}
-          transition={{ type: 'spring', stiffness: 200 }}
+      <div className="flex flex-col items-center gap-5">
+        {/* Drop / click zone */}
+        <div
+          className="relative flex flex-col items-center cursor-pointer"
+          onClick={() => fileInputRef.current?.click()}
         >
-          <BlobShell>
-            <div className="relative text-center px-8 z-10">
-              <motion.div
-                initial={{ opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.3, duration: 0.5 }}
-              >
-                <p
-                  className="text-sm font-semibold"
-                  style={{ color: 'white', textShadow: '0 1px 4px rgba(0,0,0,0.25)' }}
+          <motion.div
+            animate={{ scale: isDragOver ? 1.1 : 1 }}
+            transition={{ type: 'spring', stiffness: 200 }}
+          >
+            <BlobShell>
+              <div className="relative text-center px-8 z-10">
+                <motion.div
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: 0.3, duration: 0.5 }}
                 >
-                  {isDragOver ? 'Drop to begin' : 'Drop or click to add files'}
-                </p>
-                <p
-                  className="text-xs mt-1 opacity-80"
-                  style={{ color: 'white', textShadow: '0 1px 3px rgba(0,0,0,0.25)' }}
-                >
-                  .txt · .md · .csv · .json
-                </p>
-              </motion.div>
-            </div>
-          </BlobShell>
-        </motion.div>
+                  <p
+                    className="text-sm font-semibold"
+                    style={{ color: 'white', textShadow: '0 1px 4px rgba(0,0,0,0.25)' }}
+                  >
+                    {isDragOver ? 'Drop to begin' : 'Drop or click to add files'}
+                  </p>
+                  <p
+                    className="text-xs mt-1 opacity-80"
+                    style={{ color: 'white', textShadow: '0 1px 3px rgba(0,0,0,0.25)' }}
+                  >
+                    .txt · .md · .csv · .json
+                  </p>
+                </motion.div>
+              </div>
+            </BlobShell>
+          </motion.div>
 
-        <input
-          ref={fileInputRef}
-          type="file"
-          multiple
-          accept=".txt,.md,.csv,.json,text/plain,text/markdown,text/csv,application/json"
-          className="hidden"
-          onChange={(e) => {
-            const files = Array.from(e.target.files ?? []);
-            if (files.length) void handleFiles(files);
-            e.target.value = '';
-          }}
-        />
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept=".txt,.md,.csv,.json,text/plain,text/markdown,text/csv,application/json"
+            className="hidden"
+            onChange={(e) => {
+              const files = Array.from(e.target.files ?? []);
+              if (files.length) void handleFiles(files);
+              e.target.value = '';
+            }}
+          />
+        </div>
+
+        {/* MCP connector panel */}
+        <motion.div
+          className="flex flex-col items-center gap-3 w-72"
+          initial={{ opacity: 0, y: 6 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.5, duration: 0.4 }}
+        >
+          {/* divider */}
+          <div className="flex items-center gap-3 w-full">
+            <div className="flex-1 h-px" style={{ background: 'var(--border)' }} />
+            <span className="text-xs" style={{ color: 'var(--muted-foreground)' }}>or connect via MCP</span>
+            <div className="flex-1 h-px" style={{ background: 'var(--border)' }} />
+          </div>
+
+          {/* path input + connect button */}
+          <div className="flex gap-2 w-full">
+            <input
+              type="text"
+              value={mcpPath}
+              onChange={e => setMcpPath(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') void handleMcpConnect(); }}
+              placeholder="/path/to/folder"
+              className="flex-1 rounded-lg px-3 py-2 text-xs outline-none"
+              style={{
+                background: 'var(--secondary)',
+                border: '1px solid var(--border)',
+                color: 'var(--foreground)',
+              }}
+              disabled={mcpStatus === 'checking' || mcpStatus === 'reading'}
+            />
+            <button
+              onClick={() => void handleMcpConnect()}
+              disabled={!mcpPath.trim() || mcpStatus === 'checking' || mcpStatus === 'reading'}
+              className="rounded-lg px-3 py-2 text-xs font-semibold transition-colors"
+              style={{
+                background: 'var(--primary)',
+                color: 'var(--primary-foreground)',
+                opacity: (!mcpPath.trim() || mcpStatus === 'checking' || mcpStatus === 'reading') ? 0.5 : 1,
+                cursor: (!mcpPath.trim() || mcpStatus === 'checking' || mcpStatus === 'reading') ? 'not-allowed' : 'pointer',
+              }}
+            >
+              {mcpStatus === 'checking' ? 'Checking…' : mcpStatus === 'reading' ? 'Reading…' : 'Connect'}
+            </button>
+          </div>
+
+          {/* status / error */}
+          <AnimatePresence mode="wait">
+            {mcpStatus === 'error' && (
+              <motion.p
+                key="err"
+                className="text-xs text-center"
+                style={{ color: 'oklch(0.65 0.18 25)' }}
+                initial={{ opacity: 0, y: -4 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0 }}
+              >
+                {mcpError}
+              </motion.p>
+            )}
+          </AnimatePresence>
+
+          {/* download link */}
+          <a
+            href={MCP_CONNECTOR_URL}
+            download
+            className="text-xs transition-opacity hover:opacity-80"
+            style={{ color: 'var(--muted-foreground)' }}
+          >
+            Download MCP connector ↓
+          </a>
+        </motion.div>
       </div>
     </motion.div>
   );
