@@ -70,19 +70,19 @@ export function calcNodeDims(
 interface AccentColor { dot: string; glow: string; tint: string; text: string }
 
 const entityAccent: Record<string, AccentColor> = {
-  Company:      { dot: 'oklch(0.72 0.10 250)', glow: 'oklch(0.72 0.10 250 / 22%)', tint: 'oklch(0.72 0.10 250 / 7%)',  text: 'oklch(0.45 0.12 250)' }, // soft blue
-  Organization: { dot: 'oklch(0.72 0.10 280)', glow: 'oklch(0.72 0.10 280 / 22%)', tint: 'oklch(0.72 0.10 280 / 7%)',  text: 'oklch(0.45 0.12 280)' }, // soft indigo
-  Person:       { dot: 'oklch(0.78 0.10 145)', glow: 'oklch(0.78 0.10 145 / 22%)', tint: 'oklch(0.78 0.10 145 / 7%)',  text: 'oklch(0.45 0.12 145)' }, // soft sage
-  Market:       { dot: 'oklch(0.80 0.11 70)',  glow: 'oklch(0.80 0.11 70 / 22%)',  tint: 'oklch(0.80 0.11 70 / 7%)',   text: 'oklch(0.50 0.13 60)'  }, // soft amber
-  Technology:   { dot: 'oklch(0.74 0.10 310)', glow: 'oklch(0.74 0.10 310 / 22%)', tint: 'oklch(0.74 0.10 310 / 7%)',  text: 'oklch(0.45 0.13 310)' }, // soft lavender
-  Product:      { dot: 'oklch(0.78 0.10 0)',   glow: 'oklch(0.78 0.10 0 / 22%)',   tint: 'oklch(0.78 0.10 0 / 7%)',    text: 'oklch(0.50 0.13 5)'   }, // soft pink
-  Event:        { dot: 'oklch(0.82 0.11 95)',  glow: 'oklch(0.82 0.11 95 / 22%)',  tint: 'oklch(0.82 0.11 95 / 7%)',   text: 'oklch(0.50 0.13 90)'  }, // soft yellow
-  Location:     { dot: 'oklch(0.78 0.09 195)', glow: 'oklch(0.78 0.09 195 / 22%)', tint: 'oklch(0.78 0.09 195 / 7%)',  text: 'oklch(0.45 0.11 195)' }, // soft teal
-  Regulation:   { dot: 'oklch(0.74 0.10 25)',  glow: 'oklch(0.74 0.10 25 / 22%)',  tint: 'oklch(0.74 0.10 25 / 7%)',   text: 'oklch(0.50 0.13 25)'  }, // soft coral
-  Document:     { dot: 'oklch(0.76 0.06 230)', glow: 'oklch(0.76 0.06 230 / 22%)', tint: 'oklch(0.76 0.06 230 / 7%)',  text: 'oklch(0.45 0.08 230)' }, // soft slate-blue
-  Concept:      { dot: 'oklch(0.74 0.04 260)', glow: 'oklch(0.74 0.04 260 / 22%)', tint: 'oklch(0.74 0.04 260 / 7%)',  text: 'oklch(0.45 0.05 260)' }, // soft slate
-  Topic:        { dot: 'oklch(0.74 0.04 260)', glow: 'oklch(0.74 0.04 260 / 22%)', tint: 'oklch(0.74 0.04 260 / 7%)',  text: 'oklch(0.45 0.05 260)' },
-  Entity:       { dot: 'oklch(0.74 0.04 260)', glow: 'oklch(0.74 0.04 260 / 22%)', tint: 'oklch(0.74 0.04 260 / 7%)',  text: 'oklch(0.45 0.05 260)' },
+  Company:      { dot: 'oklch(0.70 0.14 250)', glow: 'oklch(0.70 0.14 250 / 22%)', tint: 'oklch(0.70 0.14 250 / 8%)',  text: 'oklch(0.43 0.15 250)' }, // cornflower blue
+  Organization: { dot: 'oklch(0.68 0.14 280)', glow: 'oklch(0.68 0.14 280 / 22%)', tint: 'oklch(0.68 0.14 280 / 8%)',  text: 'oklch(0.42 0.14 280)' }, // indigo
+  Person:       { dot: 'oklch(0.74 0.13 148)', glow: 'oklch(0.74 0.13 148 / 22%)', tint: 'oklch(0.74 0.13 148 / 8%)',  text: 'oklch(0.44 0.14 148)' }, // leaf green
+  Market:       { dot: 'oklch(0.76 0.14 68)',  glow: 'oklch(0.76 0.14 68 / 22%)',  tint: 'oklch(0.76 0.14 68 / 8%)',   text: 'oklch(0.48 0.15 62)'  }, // warm gold
+  Technology:   { dot: 'oklch(0.70 0.14 308)', glow: 'oklch(0.70 0.14 308 / 22%)', tint: 'oklch(0.70 0.14 308 / 8%)',  text: 'oklch(0.43 0.15 308)' }, // soft purple
+  Product:      { dot: 'oklch(0.72 0.14 12)',  glow: 'oklch(0.72 0.14 12 / 22%)',  tint: 'oklch(0.72 0.14 12 / 8%)',   text: 'oklch(0.46 0.15 10)'  }, // muted coral
+  Event:        { dot: 'oklch(0.78 0.14 88)',  glow: 'oklch(0.78 0.14 88 / 22%)',  tint: 'oklch(0.78 0.14 88 / 8%)',   text: 'oklch(0.50 0.15 84)'  }, // amber
+  Location:     { dot: 'oklch(0.72 0.13 190)', glow: 'oklch(0.72 0.13 190 / 22%)', tint: 'oklch(0.72 0.13 190 / 8%)',  text: 'oklch(0.44 0.13 190)' }, // teal
+  Regulation:   { dot: 'oklch(0.72 0.14 38)',  glow: 'oklch(0.72 0.14 38 / 22%)',  tint: 'oklch(0.72 0.14 38 / 8%)',   text: 'oklch(0.46 0.15 35)'  }, // muted orange
+  Document:     { dot: 'oklch(0.72 0.11 222)', glow: 'oklch(0.72 0.11 222 / 22%)', tint: 'oklch(0.72 0.11 222 / 8%)',  text: 'oklch(0.44 0.11 222)' }, // sky blue
+  Concept:      { dot: 'oklch(0.68 0.07 258)', glow: 'oklch(0.68 0.07 258 / 22%)', tint: 'oklch(0.68 0.07 258 / 8%)',  text: 'oklch(0.42 0.07 258)' }, // neutral slate
+  Topic:        { dot: 'oklch(0.68 0.07 258)', glow: 'oklch(0.68 0.07 258 / 22%)', tint: 'oklch(0.68 0.07 258 / 8%)',  text: 'oklch(0.42 0.07 258)' },
+  Entity:       { dot: 'oklch(0.68 0.07 258)', glow: 'oklch(0.68 0.07 258 / 22%)', tint: 'oklch(0.68 0.07 258 / 8%)',  text: 'oklch(0.42 0.07 258)' },
 };
 
 const fallbackAccent: AccentColor = entityAccent.Concept;
