@@ -14,6 +14,7 @@ interface NodeInputBoxProps {
   position: { x: number; y: number };
   onAction: (action: string, prompt: string) => void;
   onClose: () => void;
+  onDelete?: () => void;
 }
 
 const actions = [
@@ -31,7 +32,7 @@ const actions = [
   },
 ];
 
-export function NodeInputBox({ nodeLabel, entityType, relationships = [], position, onAction, onClose }: NodeInputBoxProps) {
+export function NodeInputBox({ nodeLabel, entityType, relationships = [], position, onAction, onClose, onDelete }: NodeInputBoxProps) {
   const [prompt, setPrompt] = useState('');
   const [dragOffset, setDragOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
@@ -106,13 +107,25 @@ export function NodeInputBox({ nodeLabel, entityType, relationships = [], positi
                 {nodeLabel}
               </p>
             </div>
-            <button
-              onClick={onClose}
-              className="shrink-0 w-5 h-5 flex items-center justify-center rounded-full text-xs transition-colors hover:bg-accent"
-              style={{ color: 'var(--muted-foreground)' }}
-            >
-              ✕
-            </button>
+            <div className="flex items-center gap-1 shrink-0">
+              {onDelete && (
+                <button
+                  onClick={onDelete}
+                  title="Delete node and its children"
+                  className="w-5 h-5 flex items-center justify-center rounded-full text-xs transition-colors hover:bg-destructive/20"
+                  style={{ color: 'var(--destructive, #ef4444)' }}
+                >
+                  🗑
+                </button>
+              )}
+              <button
+                onClick={onClose}
+                className="w-5 h-5 flex items-center justify-center rounded-full text-xs transition-colors hover:bg-accent"
+                style={{ color: 'var(--muted-foreground)' }}
+              >
+                ✕
+              </button>
+            </div>
           </div>
 
           {/* Relationships — what this node actually means in context */}

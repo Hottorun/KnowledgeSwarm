@@ -336,6 +336,9 @@ function KnowledgeGraphCanvasInner() {
   // never appear in unsorted positions.
   const pendingNodesRef = useRef<Map<string, GraphLayoutNode>>(new Map());
   const pendingEdgesRef = useRef<Map<string, Edge>>(new Map());
+  // Undo history — snapshots of {nodes, edges} before each expansion/deletion
+  const historyRef = useRef<Array<{ nodes: Node[]; edges: Edge[] }>>([]);
+  const [canUndo, setCanUndo] = useState(false);
 
   useOnViewportChange({
     onChange: useCallback((vp: { x: number; y: number; zoom: number }) => {
@@ -611,6 +614,8 @@ function KnowledgeGraphCanvasInner() {
     expansionQueueRef.current.length = 0;
     expansionRunningRef.current = false;
     setQueuedExpansions(0);
+    historyRef.current = [];
+    setCanUndo(false);
     setNodes([]);
     setEdges([]);
     setReasoningSteps([]);
@@ -737,6 +742,62 @@ function KnowledgeGraphCanvasInner() {
     userMovedRef.current.add(node.id);
     nodePositionRef.current.set(node.id, { x: node.position.x, y: node.position.y });
   }, []);
+
+  const pushHistory = useCallback(() => {
+    historyRef.current = [
+      { nodes: [...nodesRef.current], edges: [...edgesRef.current] },
+      ...historyRef.current,
+    ].slice(0, 20);
+    setCanUndo(true);
+  }, []);
+
+  const handleUndo = useCallback(() => {
+    const prev = historyRef.current.shift();
+    if (!prev) return;
+    setNodes(prev.nodes);
+    setEdges(prev.edges);
+    setCanUndo(historyRef.current.length > 0);
+    setSelectedNode(null);
+    setInputBoxPos(null);
+  }, [setNodes, setEdges]);
+
+  const handleDeleteNode = useCallback(() => {
+    if (!selectedNode) return;
+    const nodeId = selectedNode.id;
+    // Collect the node + entire descendant subtree
+    const toDelete = new Set<string>([nodeId]);
+    const queue = [nodeId];
+    while (queue.length) {
+      const current = queue.shift()!;
+      edgesRef.current.filter(e => e.source === current).forEach(e => {
+        if (!toDelete.has(e.target)) {
+          toDelete.add(e.target);
+          queue.push(e.target);
+        }
+      });
+    }
+    pushHistory();
+    toDelete.forEach(id => {
+      userMovedRef.current.delete(id);
+      nodePositionRef.current.delete(id);
+    });
+    setNodes(prev => prev.filter(n => !toDelete.has(n.id)));
+    setEdges(prev => prev.filter(e => !toDelete.has(e.source) && !toDelete.has(e.target)));
+    setSelectedNode(null);
+    setInputBoxPos(null);
+  }, [selectedNode, pushHistory, setNodes, setEdges]);
+
+  // Ctrl+Z / Cmd+Z → undo
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        handleUndo();
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [handleUndo]);
 
   const handleNodeAction = useCallback(async (action: string, prompt: string) => {
     if (!selectedNode) return;
@@ -893,8 +954,26 @@ function KnowledgeGraphCanvasInner() {
       categories: `Generate 5 broad sub-categories of "${label}"${pathContext}. Stay abstract — no specific facts, numbers, dates, or individual names. Categories only.`,
       details:    `Find specific facts, statistics, key names, and concrete data points about "${label}"${pathContext}.`,
     };
+
+    // Detect grouping intent: "find X", "list X", "similar X", "compare X", "show X"
+    const groupingPatterns = [
+      /^(?:find|list|show|get|give me|what are)\s+(?:some\s+)?(.+)/i,
+      /^similar\s+(.+)/i,
+      /^(.+)\s+similar\s+to/i,
+      /^compare\s+(.+)/i,
+    ];
+    let groupingHint = '';
+    for (const pat of groupingPatterns) {
+      const m = prompt.match(pat);
+      if (m) {
+        const rawTerm = m[1].trim().replace(/\b\w/g, c => c.toUpperCase());
+        groupingHint = `\n\nGROUPING INSTRUCTION: The user wants to group results into a list. You MUST create ONE intermediate category node (name it "${rawTerm}" or a concise variant) as a direct child of "${label}", then attach all individual items as children of THAT category node. The required chain is: "${label}" → [category node] → [individual items]. Do NOT attach individual items directly to "${label}".`;
+        break;
+      }
+    }
+
     const question = prompt
-      ? `${prompt} — specifically about "${label}"${pathContext}`
+      ? `${prompt} — specifically about "${label}"${pathContext}${groupingHint}`
       : defaultQuestions[action] ?? defaultQuestions.categories;
 
     setReasoningSteps(prev => [...prev, {
@@ -910,6 +989,8 @@ function KnowledgeGraphCanvasInner() {
       expansionAnchorRef.current = { id: selectedNodeId, pos: selectedNodePos };
       expansionChildIdxRef.current = childIdxAtClick;
       expansionDepthRef.current = depthAtClick;
+      // Snapshot before any expansion mutates state so the user can undo it
+      pushHistory();
 
       try {
         const result = await apiExpandSubtree(runId, rootNode, contextNodes, contextEdges, question, expandCtx);
@@ -950,7 +1031,7 @@ function KnowledgeGraphCanvasInner() {
     }
     expansionRunningRef.current = false;
     setQueuedExpansions(0);
-  }, [selectedNode, runId, nodes, edges, setNodes, setEdges]);
+  }, [selectedNode, runId, nodes, edges, setNodes, setEdges, pushHistory]);
 
   const handleNodeFocus = useCallback((nodeId: string) => {
     const node = nodes.find(n => n.id === nodeId);
@@ -1084,6 +1165,7 @@ function KnowledgeGraphCanvasInner() {
             position={inputBoxPos}
             onAction={handleNodeAction}
             onClose={() => { setSelectedNode(null); setInputBoxPos(null); setSelectedNodeRelationships([]); }}
+            onDelete={(selectedNode.data as GraphNodeData).nodeType !== 'root' ? handleDeleteNode : undefined}
           />
         )}
       </AnimatePresence>
@@ -1111,6 +1193,29 @@ function KnowledgeGraphCanvasInner() {
             />
             {queuedExpansions === 1 ? 'Expanding…' : `${queuedExpansions} expansions queued`}
           </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Undo button — floats bottom-left when history is available */}
+      <AnimatePresence>
+        {canUndo && !isEmpty && (
+          <motion.button
+            initial={{ opacity: 0, x: -8 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: -8 }}
+            transition={{ duration: 0.18 }}
+            onClick={handleUndo}
+            title="Undo last change (⌘Z)"
+            className="fixed bottom-20 left-4 z-30 px-3 py-1.5 rounded-full text-xs font-medium flex items-center gap-1.5 transition-colors hover:bg-accent"
+            style={{
+              background: 'var(--kg-node-bg)',
+              border: '1px solid var(--kg-node-border)',
+              boxShadow: 'var(--kg-shadow-md)',
+              color: 'var(--foreground)',
+            }}
+          >
+            ↩ Undo
+          </motion.button>
         )}
       </AnimatePresence>
 
