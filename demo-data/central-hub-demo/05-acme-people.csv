@@ -1,0 +1,7 @@
+person,role,organization,relationship_to_acme
+Maya Chen,CEO,Acme Corp,leads Acme Corp
+Priya Raman,Head of Manufacturing,Beta Storage,integrates Beta Storage for Acme Corp
+Jonas Weber,VP Partnerships,VoltGrid GmbH,manages VoltGrid GmbH partnership with Acme Corp
+Elena Park,General Counsel,Acme Corp,reviews Acme Corp supply agreements
+Luis Ortega,Finance Director,Acme Corp,tracks Acme Corp integration fees
+
