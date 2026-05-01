@@ -1312,6 +1312,7 @@ function KnowledgeGraphCanvasInner() {
             onAction={handleNodeAction}
             onClose={() => { setSelectedNode(null); setInputBoxPos(null); setSelectedNodeRelationships([]); setHighlightedNodes(new Set()); setNodes(nds => nds.map(n => ({ ...n, selected: false }))); }}
             onDelete={(selectedNode.data as GraphNodeData).nodeType !== 'root' ? handleDeleteNode : undefined}
+            addedByAI={!!( selectedNode.data as Record<string, unknown>).parentId}
           />
         )}
       </AnimatePresence>

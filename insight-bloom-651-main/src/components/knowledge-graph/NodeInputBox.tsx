@@ -15,6 +15,7 @@ interface NodeInputBoxProps {
   onAction: (action: string, prompt: string) => void;
   onClose: () => void;
   onDelete?: () => void;
+  addedByAI?: boolean;
 }
 
 const actions = [
@@ -32,7 +33,7 @@ const actions = [
   },
 ];
 
-export function NodeInputBox({ nodeLabel, entityType, relationships = [], position, onAction, onClose, onDelete }: NodeInputBoxProps) {
+export function NodeInputBox({ nodeLabel, entityType, relationships = [], position, onAction, onClose, onDelete, addedByAI }: NodeInputBoxProps) {
   const [prompt, setPrompt] = useState('');
   const [dragOffset, setDragOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
@@ -98,11 +99,24 @@ export function NodeInputBox({ nodeLabel, entityType, relationships = [], positi
         <div className="px-4 pt-3 pb-2 cursor-grab" style={{ borderBottom: '1px solid var(--border)' }}>
           <div className="flex items-start justify-between gap-2">
             <div className="flex-1 min-w-0">
-              {entityType && (
-                <span className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: 'var(--muted-foreground)' }}>
-                  {entityType}
-                </span>
-              )}
+              <div className="flex items-center gap-1.5 mb-0.5">
+                {entityType && (
+                  <span className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: 'var(--muted-foreground)' }}>
+                    {entityType}
+                  </span>
+                )}
+                {addedByAI && (
+                  <span
+                    className="inline-flex items-center gap-0.5 text-[9px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded-full"
+                    style={{ background: 'oklch(0.58 0.16 255 / 10%)', color: 'oklch(0.50 0.16 255)', border: '1px solid oklch(0.58 0.16 255 / 20%)' }}
+                  >
+                    <svg width="8" height="8" viewBox="0 0 16 16" fill="currentColor">
+                      <path d="M8 0 L9.5 6 L16 8 L9.5 10 L8 16 L6.5 10 L0 8 L6.5 6 Z" />
+                    </svg>
+                    AI
+                  </span>
+                )}
+              </div>
               <p className="text-sm font-semibold leading-tight truncate" style={{ color: 'var(--foreground)' }}>
                 {nodeLabel}
               </p>
