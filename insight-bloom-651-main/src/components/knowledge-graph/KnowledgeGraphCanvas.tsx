@@ -335,6 +335,7 @@ function KnowledgeGraphCanvasInner() {
   const nodeTypes = useMemo(() => ({ graphNode: GraphNodeMemo }), []);
   const edgeTypes = useMemo(() => ({ floating: FloatingEdge }), []);
   const [highlightedNodes, setHighlightedNodes] = useState<Set<string>>(new Set());
+  const [aiHighlightedNodes, setAiHighlightedNodes] = useState<Set<string>>(new Set());
   const [expandedSubtree, setExpandedSubtree] = useState<Set<string>>(new Set());
   const [pinnedExpansion, setPinnedExpansion] = useState<Set<string>>(new Set());
   const [viewport, setViewport] = useState({ x: 0, y: 0, zoom: 1 });
@@ -780,6 +781,7 @@ function KnowledgeGraphCanvasInner() {
     setNodes([]);
     setEdges([]);
     setReasoningSteps([]);
+    setAiHighlightedNodes(new Set());
     isSwarmExtraction.current = false;
 
     setDataSources(prev => [...prev, {
@@ -1194,6 +1196,10 @@ function KnowledgeGraphCanvasInner() {
         // POST returns once backend has emitted all SSE events. Give the frontend
         // 700ms to drain its layout-debounce buffer before the next task swaps anchors.
         await new Promise(r => setTimeout(r, 700));
+        // Highlight newly added nodes so the user can spot what changed
+        if (expansionNewNodesRef.current.size > 0) {
+          setAiHighlightedNodes(new Set(expansionNewNodesRef.current));
+        }
         setReasoningSteps(prev => [...prev, {
           id: `r-${Date.now()}-done`,
           text: `"${nodeData.label}" expanded: ${result.newTriplesPersisted} new relationship(s). ${result.summary}`,
@@ -1396,6 +1402,7 @@ function KnowledgeGraphCanvasInner() {
 
     // Track node count before query so we can report how many were added
     const nodeCountBefore = nodesRef.current.length;
+    const preQueryNodeIds = new Set(nodesRef.current.map(n => n.id));
 
     // Flag SSE handler to commit query nodes immediately (not via batch layout)
     queryModeRef.current = true;
@@ -1408,6 +1415,11 @@ function KnowledgeGraphCanvasInner() {
       await new Promise(r => setTimeout(r, 900));
       const added = nodesRef.current.length - nodeCountBefore;
       setQueryNewNodesCount(Math.max(0, added));
+      // Highlight nodes that didn't exist before this query
+      const newQueryNodeIds = new Set(nodesRef.current.filter(n => !preQueryNodeIds.has(n.id)).map(n => n.id));
+      if (newQueryNodeIds.size > 0) {
+        setAiHighlightedNodes(newQueryNodeIds);
+      }
 
       if (result.newTriplesPersisted > 0) {
         setReasoningSteps(prev => [...prev, {
@@ -1436,6 +1448,7 @@ function KnowledgeGraphCanvasInner() {
     setSelectedNode(null);
     setInputBoxPos(null);
     setHighlightedNodes(new Set());
+    setAiHighlightedNodes(new Set());
     setExpandedSubtree(new Set());
     setLeftPanel(false);
   }, []);
@@ -1454,11 +1467,11 @@ function KnowledgeGraphCanvasInner() {
       zIndex: expanded.has(n.id) ? 10 : 0,
       data: {
         ...n.data,
-        isHighlighted: highlightedNodes.has(n.id),
+        isHighlighted: highlightedNodes.has(n.id) || aiHighlightedNodes.has(n.id),
         compact: isCompact && (n.data as GraphNodeData).nodeType !== 'root' && (childCount.get(n.id) || 0) < 3 && !expanded.has(n.id),
       },
     }));
-  }, [nodes, edges, highlightedNodes, expandedSubtree, pinnedExpansion]);
+  }, [nodes, edges, highlightedNodes, aiHighlightedNodes, expandedSubtree, pinnedExpansion]);
 
   return (
     <div className="w-screen h-screen relative overflow-hidden" style={{ background: 'var(--kg-canvas)' }}>
