@@ -18,22 +18,16 @@ interface NodeInputBoxProps {
 
 const actions = [
   {
-    key: 'expand',
-    label: 'Expand',
-    icon: '↗',
-    hint: 'Add key sub-topics and facts',
+    key: 'categories',
+    label: 'Categories',
+    icon: '🗂',
+    hint: 'Broad sub-categories — keeps things abstract',
   },
   {
-    key: 'research',
-    label: 'Deep Research',
+    key: 'details',
+    label: 'Details',
     icon: '🔬',
-    hint: 'Stats, players, recent developments',
-  },
-  {
-    key: 'connect',
-    label: 'Connections',
-    icon: '🔗',
-    hint: 'Map dependencies and relationships',
+    hint: 'Specific facts, names, numbers',
   },
 ];
 
@@ -46,13 +40,17 @@ export function NodeInputBox({ nodeLabel, entityType, relationships = [], positi
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      onAction('expand', prompt.trim());
+      // Enter with text → ask question (uses details prompt path); empty → categories.
+      onAction(prompt.trim() ? 'details' : 'categories', prompt.trim());
     }
     if (e.key === 'Escape') onClose();
   }, [prompt, onAction, onClose]);
 
   const handlePointerDown = useCallback((e: React.PointerEvent) => {
-    if ((e.target as HTMLElement).tagName === 'INPUT' || (e.target as HTMLElement).tagName === 'BUTTON') return;
+    // Walk up the DOM — clicks land on spans/icons inside buttons, so checking
+    // tagName on e.target alone misses them and drag hijacks the click.
+    const el = e.target as HTMLElement;
+    if (el.closest('button, input, textarea, [data-no-drag]')) return;
     setIsDragging(true);
     setDragStart({ x: e.clientX - dragOffset.x, y: e.clientY - dragOffset.y });
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
@@ -159,12 +157,15 @@ export function NodeInputBox({ nodeLabel, entityType, relationships = [], positi
             <button
               key={action.key}
               onClick={() => onAction(action.key, prompt.trim())}
-              className="flex-1 flex flex-col items-center gap-0.5 py-2.5 px-1 text-center transition-colors duration-150 hover:bg-accent"
+              className="flex-1 flex flex-col items-center gap-0.5 py-3 px-2 text-center transition-colors duration-150 hover:bg-accent"
               title={action.hint}
             >
-              <span className="text-sm">{action.icon}</span>
-              <span className="text-[10px] font-medium leading-tight" style={{ color: 'var(--muted-foreground)' }}>
+              <span className="text-base">{action.icon}</span>
+              <span className="text-[11px] font-semibold leading-tight" style={{ color: 'var(--foreground)' }}>
                 {action.label}
+              </span>
+              <span className="text-[9px] leading-tight px-1" style={{ color: 'var(--muted-foreground)' }}>
+                {action.hint.split('—')[0].trim()}
               </span>
             </button>
           ))}

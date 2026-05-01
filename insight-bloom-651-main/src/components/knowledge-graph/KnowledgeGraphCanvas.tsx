@@ -13,7 +13,7 @@ import {
   type Edge,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { AnimatePresence } from 'framer-motion';
+import { AnimatePresence, motion } from 'framer-motion';
 
 import { AnimatedBlob, LoadingBlob } from './AnimatedBlob';
 import { GraphNodeMemo, calcNodeDims, type GraphNodeData } from './GraphNode';
@@ -319,6 +319,12 @@ function KnowledgeGraphCanvasInner() {
   const placeholderNodesRef = useRef<Set<string>>(new Set());
   const expansionAnchorRef = useRef<{ id: string; pos: { x: number; y: number } } | null>(null);
   const expansionChildIdxRef = useRef<number>(0);
+  // Serialize expansions — clicking expand on a 2nd node before the 1st finishes
+  // would otherwise overwrite expansionAnchorRef and route all the 1st's pending
+  // SSE nodes to the 2nd's anchor.
+  const expansionQueueRef = useRef<Array<() => Promise<void>>>([]);
+  const expansionRunningRef = useRef<boolean>(false);
+  const [queuedExpansions, setQueuedExpansions] = useState<number>(0);
   const nodesRef = useRef<Node[]>([]);
   const expansionDepthRef = useRef<number>(0);
   const layoutDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -602,6 +608,9 @@ function KnowledgeGraphCanvasInner() {
     pendingNodesRef.current.clear();
     pendingEdgesRef.current.clear();
     userMovedRef.current.clear();
+    expansionQueueRef.current.length = 0;
+    expansionRunningRef.current = false;
+    setQueuedExpansions(0);
     setNodes([]);
     setEdges([]);
     setReasoningSteps([]);
@@ -733,6 +742,13 @@ function KnowledgeGraphCanvasInner() {
     if (!selectedNode) return;
 
     const nodeData = selectedNode.data as GraphNodeData;
+    // Snapshot at click-time — these are what the queued task will use, not whatever
+    // the graph looks like by the time the queue gets to it.
+    const clickedNodeSnapshot = selectedNode;
+    const selectedNodeId = clickedNodeSnapshot.id;
+    const selectedNodePos = { ...clickedNodeSnapshot.position };
+    const childIdxAtClick = edges.filter(e => e.source === selectedNodeId).length;
+    const depthAtClick = computeNodeDepth(selectedNodeId, edges);
 
     setSelectedNode(null);
     setInputBoxPos(null);
@@ -747,14 +763,9 @@ function KnowledgeGraphCanvasInner() {
       return;
     }
 
-    // Set expansion anchor — start child index after existing children so new nodes don't overlap
-    expansionAnchorRef.current = { id: selectedNode.id, pos: { ...selectedNode.position } };
-    expansionChildIdxRef.current = edges.filter(e => e.source === selectedNode.id).length;
-    expansionDepthRef.current = computeNodeDepth(selectedNode.id, edges);
-
     // ── Collect subtree going DOWN (children of selected node) ──────────────
-    const subtreeIds = new Set<string>([selectedNode.id]);
-    const downQueue = [selectedNode.id];
+    const subtreeIds = new Set<string>([selectedNodeId]);
+    const downQueue = [selectedNodeId];
     while (downQueue.length) {
       const current = downQueue.shift()!;
       edges.filter(e => e.source === current).forEach(e => {
@@ -770,7 +781,7 @@ function KnowledgeGraphCanvasInner() {
 
     // ── Collect ancestors going UP (parent chain to root) ────────────────────
     const ancestorIds = new Set<string>();
-    const upQueue = [selectedNode.id];
+    const upQueue = [selectedNodeId];
     while (upQueue.length) {
       const current = upQueue.shift()!;
       edges
@@ -785,13 +796,13 @@ function KnowledgeGraphCanvasInner() {
 
     const ancestorNodes = nodes.filter(n => ancestorIds.has(n.id));
     const ancestorEdges = edges.filter(e =>
-      (ancestorIds.has(e.source) && (ancestorIds.has(e.target) || e.target === selectedNode.id)) ||
+      (ancestorIds.has(e.source) && (ancestorIds.has(e.target) || e.target === selectedNodeId)) ||
       (ancestorIds.has(e.target) && ancestorIds.has(e.source))
     );
 
     // ── Build breadcrumb path for question context ───────────────────────────
     const breadcrumb: string[] = [];
-    let cursor = selectedNode.id;
+    let cursor = selectedNodeId;
     const visited = new Set<string>();
     while (true) {
       visited.add(cursor);
@@ -806,7 +817,7 @@ function KnowledgeGraphCanvasInner() {
     const contextPath = breadcrumb.join(' › ');
 
     const rootNode = {
-      id: selectedNode.id,
+      id: selectedNodeId,
       label: nodeData.label,
       type: nodeData.description ?? 'Entity',
     };
@@ -816,7 +827,7 @@ function KnowledgeGraphCanvasInner() {
       (typeof e.label === 'string' && e.label ? e.label : (e.data as { predicate?: string })?.predicate) ?? 'related_to';
 
     const contextNodes = [
-      ...subtreeNodes.filter(n => n.id !== selectedNode.id),
+      ...subtreeNodes.filter(n => n.id !== selectedNodeId),
       ...ancestorNodes,
     ].map(n => ({
       id: n.id,
@@ -834,7 +845,7 @@ function KnowledgeGraphCanvasInner() {
     }));
 
     // ── Resolve parent node (direct parent of the clicked node) ────────────────
-    const parentEdge = edges.find(e => e.target === selectedNode.id && ancestorIds.has(e.source));
+    const parentEdge = edges.find(e => e.target === selectedNodeId && ancestorIds.has(e.source));
     const parentNodeInGraph = parentEdge ? nodes.find(n => n.id === parentEdge.source) : null;
     const parentNodePayload = parentNodeInGraph
       ? {
@@ -847,7 +858,7 @@ function KnowledgeGraphCanvasInner() {
     // ── Siblings: other children of the same parent (excludes selected node) ───
     const siblingLabels = parentEdge
       ? edges
-          .filter(e => e.source === parentEdge.source && e.target !== selectedNode.id)
+          .filter(e => e.source === parentEdge.source && e.target !== selectedNodeId)
           .map(e => {
             const sibling = nodes.find(n => n.id === e.target);
             return sibling ? (sibling.data as GraphNodeData).label : null;
@@ -879,39 +890,66 @@ function KnowledgeGraphCanvasInner() {
     const label = nodeData.label;
     const pathContext = breadcrumb.length > 1 ? ` (context path: ${contextPath})` : '';
     const defaultQuestions: Record<string, string> = {
-      expand:   `Expand the node "${label}"${pathContext} with 5 logical sub-categories following breadth-first abstraction.`,
-      research: `Do deep research on "${label}"${pathContext}. Find specific facts, statistics, key people, and recent developments.`,
-      connect:  `Map the relationship network of "${label}"${pathContext}. What entities, markets, and concepts is it directly connected to?`,
+      categories: `Generate 5 broad sub-categories of "${label}"${pathContext}. Stay abstract — no specific facts, numbers, dates, or individual names. Categories only.`,
+      details:    `Find specific facts, statistics, key names, and concrete data points about "${label}"${pathContext}.`,
     };
     const question = prompt
       ? `${prompt} — specifically about "${label}"${pathContext}`
-      : defaultQuestions[action] ?? `Expand "${label}"${pathContext} with more details`;
+      : defaultQuestions[action] ?? defaultQuestions.categories;
 
     setReasoningSteps(prev => [...prev, {
       id: `r-${Date.now()}`,
-      text: `Expanding "${nodeData.label}" (Level ${graphDepth})${parentNodePayload ? ` under "${parentNodePayload.label}"` : ''}…`,
+      text: `Queued "${nodeData.label}" (Level ${graphDepth})${parentNodePayload ? ` under "${parentNodePayload.label}"` : ''}…`,
       timestamp: new Date(),
       type: 'expansion',
     }]);
 
-    try {
-      const result = await apiExpandSubtree(runId, rootNode, contextNodes, contextEdges, question, expandCtx);
-      setReasoningSteps(prev => [...prev, {
-        id: `r-${Date.now()}-done`,
-        text: `"${nodeData.label}" expanded: ${result.newTriplesPersisted} new relationship(s). ${result.summary}`,
-        timestamp: new Date(),
-        type: 'expansion',
-      }]);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Unknown error';
-      console.error('[KnowledgeGraph] Expansion failed:', msg);
-      setReasoningSteps(prev => [...prev, {
-        id: `r-${Date.now()}-err`,
-        text: `Expansion failed: ${msg}`,
-        timestamp: new Date(),
-        type: 'analysis',
-      }]);
+    // Build the expansion task — runs in the queue, sets the anchor, fires the
+    // request, and waits for SSE settle before yielding to the next task.
+    const task = async () => {
+      expansionAnchorRef.current = { id: selectedNodeId, pos: selectedNodePos };
+      expansionChildIdxRef.current = childIdxAtClick;
+      expansionDepthRef.current = depthAtClick;
+
+      try {
+        const result = await apiExpandSubtree(runId, rootNode, contextNodes, contextEdges, question, expandCtx);
+        // POST returns once backend has emitted all SSE events. Give the frontend
+        // 700ms to drain its layout-debounce buffer before the next task swaps anchors.
+        await new Promise(r => setTimeout(r, 700));
+        setReasoningSteps(prev => [...prev, {
+          id: `r-${Date.now()}-done`,
+          text: `"${nodeData.label}" expanded: ${result.newTriplesPersisted} new relationship(s). ${result.summary}`,
+          timestamp: new Date(),
+          type: 'expansion',
+        }]);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Unknown error';
+        console.error('[KnowledgeGraph] Expansion failed:', msg);
+        setReasoningSteps(prev => [...prev, {
+          id: `r-${Date.now()}-err`,
+          text: `Expansion failed: ${msg}`,
+          timestamp: new Date(),
+          type: 'analysis',
+        }]);
+      } finally {
+        // Clear anchor so the next task starts clean (or initial-load events
+        // route to the buffered path instead of trying to attach to this node).
+        expansionAnchorRef.current = null;
+      }
+    };
+
+    expansionQueueRef.current.push(task);
+    setQueuedExpansions(expansionQueueRef.current.length + (expansionRunningRef.current ? 1 : 0));
+
+    if (expansionRunningRef.current) return;
+    expansionRunningRef.current = true;
+    while (expansionQueueRef.current.length > 0) {
+      const next = expansionQueueRef.current.shift()!;
+      setQueuedExpansions(expansionQueueRef.current.length + 1);
+      await next();
     }
+    expansionRunningRef.current = false;
+    setQueuedExpansions(0);
   }, [selectedNode, runId, nodes, edges, setNodes, setEdges]);
 
   const handleNodeFocus = useCallback((nodeId: string) => {
@@ -1047,6 +1085,32 @@ function KnowledgeGraphCanvasInner() {
             onAction={handleNodeAction}
             onClose={() => { setSelectedNode(null); setInputBoxPos(null); setSelectedNodeRelationships([]); }}
           />
+        )}
+      </AnimatePresence>
+
+      {/* Expansion queue indicator */}
+      <AnimatePresence>
+        {queuedExpansions > 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            transition={{ duration: 0.2 }}
+            className="fixed top-16 left-1/2 -translate-x-1/2 z-30 px-3 py-1.5 rounded-full text-xs font-medium flex items-center gap-2"
+            style={{
+              background: 'var(--kg-node-bg)',
+              border: '1px solid var(--kg-node-border)',
+              boxShadow: 'var(--kg-shadow-md)',
+              color: 'var(--muted-foreground)',
+            }}
+          >
+            <motion.span
+              animate={{ rotate: 360 }}
+              transition={{ duration: 1.4, repeat: Infinity, ease: 'linear' }}
+              style={{ display: 'inline-block', width: 10, height: 10, borderRadius: '50%', borderTop: '2px solid var(--primary)', borderRight: '2px solid transparent' }}
+            />
+            {queuedExpansions === 1 ? 'Expanding…' : `${queuedExpansions} expansions queued`}
+          </motion.div>
         )}
       </AnimatePresence>
 
