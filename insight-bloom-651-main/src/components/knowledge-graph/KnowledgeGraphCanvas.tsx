@@ -335,6 +335,50 @@ function KnowledgeGraphCanvasInner() {
 
   const nodeTypes = useMemo(() => ({ graphNode: GraphNodeMemo }), []);
   const edgeTypes = useMemo(() => ({ floating: FloatingEdge }), []);
+
+  // Web Worker for off-main-thread layout
+  const layoutWorkerRef = useRef<Worker | null>(null);
+  const layoutWorkerIdRef = useRef(0);
+  const layoutWorkerPendingRef = useRef<Map<number, (positions: Record<string, { x: number; y: number }>) => void>>(new Map());
+
+  useEffect(() => {
+    const worker = new Worker(new URL('../../workers/layout.worker.ts', import.meta.url), { type: 'module' });
+    worker.onmessage = (e: MessageEvent) => {
+      const { id, positions } = e.data as { id: number; positions: Record<string, { x: number; y: number }> };
+      const resolve = layoutWorkerPendingRef.current.get(id);
+      if (resolve) {
+        layoutWorkerPendingRef.current.delete(id);
+        resolve(positions);
+      }
+    };
+    layoutWorkerRef.current = worker;
+    return () => { worker.terminate(); layoutWorkerRef.current = null; };
+  }, []);
+
+  const runLayoutAsync = useCallback(
+    (layoutNodes: GraphLayoutNode[], layoutEdges: Edge[], manualPins: Set<string>): Promise<Record<string, { x: number; y: number }>> => {
+      const worker = layoutWorkerRef.current;
+      if (!worker) {
+        // Synchronous fallback if worker not yet ready
+        const result = layout(layoutNodes, layoutEdges, manualPins);
+        const positions: Record<string, { x: number; y: number }> = {};
+        for (const n of result) positions[n.id] = n.position;
+        return Promise.resolve(positions);
+      }
+      return new Promise(resolve => {
+        const id = ++layoutWorkerIdRef.current;
+        layoutWorkerPendingRef.current.set(id, resolve);
+        worker.postMessage({
+          id,
+          nodes: layoutNodes.map(n => ({ id: n.id, position: n.position, data: { nodeType: (n.data as GraphNodeData).nodeType, label: (n.data as GraphNodeData).label, description: (n.data as GraphNodeData).description } })),
+          edges: layoutEdges.map(e => ({ source: e.source, target: e.target })),
+          manualPins: [...manualPins],
+        });
+      });
+    },
+    [],
+  );
+
   const [highlightedNodes, setHighlightedNodes] = useState<Set<string>>(new Set());
   const [aiHighlightedNodes, setAiHighlightedNodes] = useState<Set<string>>(new Set());
   const [expandedSubtree, setExpandedSubtree] = useState<Set<string>>(new Set());
@@ -579,28 +623,39 @@ function KnowledgeGraphCanvasInner() {
           pendingEdgesRef.current.clear();
 
           const allEdges = [...edgesRef.current, ...pEdges];
-          const laidOut = layout(
-            [...(nodesRef.current as GraphLayoutNode[]), ...pNodes],
-            allEdges,
-            userMovedRef.current,
-          ) as Node[];
+          // Add incoming nodes invisible so they don't flash in the top-left corner
+          const allInputNodes = [
+            ...(nodesRef.current as GraphLayoutNode[]),
+            ...pNodes.map(n => ({ ...n, style: { ...n.style, opacity: 0 } })),
+          ];
 
-          const animated = assignAnimDelays(laidOut, allEdges);
-          setNodes(animated.nodes);
-          setEdges(animated.edges);
-          setIsProcessing(false);
+          void runLayoutAsync(allInputNodes, allEdges, userMovedRef.current).then(positions => {
+            const laidOut = allInputNodes.map(n => ({
+              ...n,
+              position: positions[n.id] ?? n.position,
+              style: { ...n.style, opacity: 1 },
+            })) as Node[];
+            const animated = assignAnimDelays(laidOut, allEdges);
+            setNodes(animated.nodes);
+            setEdges(animated.edges);
+            setIsProcessing(false);
 
-          if (!hadCommittedNodes) {
-            // Double-rAF: first fires after React's commit, second after the browser paints layout
-            requestAnimationFrame(() => {
+            if (!hadCommittedNodes) {
+              // Double-rAF: first fires after React's commit, second after the browser paints layout
               requestAnimationFrame(() => {
-                reactFlowInstance.fitView({ padding: 0.12, duration: 0 });
+                requestAnimationFrame(() => {
+                  reactFlowInstance.fitView({ padding: 0.12, duration: 0 });
+                });
               });
-            });
-          }
+            }
+          });
         } else {
-          // Expansion: just re-layout existing committed nodes
-          setNodes(prev => layout(prev as GraphLayoutNode[], edgesRef.current, userMovedRef.current) as Node[]);
+          // Expansion: re-layout committed nodes off the main thread
+          const currentNodes = nodesRef.current as GraphLayoutNode[];
+          const currentEdges = edgesRef.current;
+          void runLayoutAsync(currentNodes, currentEdges, userMovedRef.current).then(positions => {
+            setNodes(prev => prev.map(n => positions[n.id] ? { ...n, position: positions[n.id] } : n));
+          });
         }
       }, 600);
     });
@@ -742,7 +797,7 @@ function KnowledgeGraphCanvasInner() {
 
     source.addEventListener('agent.step', addReasoning);
     source.addEventListener('run.status', addReasoning);
-  }, [assignSpiralPosition, assignChildPosition, setNodes, setEdges]);
+  }, [assignSpiralPosition, assignChildPosition, setNodes, setEdges, runLayoutAsync]);
 
   useEffect(() => {
     return () => {
