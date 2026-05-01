@@ -443,3 +443,39 @@ export async function verifyOpenAIKey(key: string): Promise<boolean> {
     return false;
   }
 }
+
+export interface NodeRelationship {
+  direction: 'out' | 'in';
+  predicate: string;
+  otherLabel: string;
+}
+
+export async function describeNode(
+  label: string,
+  entityType: string,
+  relationships: NodeRelationship[],
+): Promise<string | null> {
+  try {
+    const relText = relationships.length > 0
+      ? relationships
+          .slice(0, 8)
+          .map(r => r.direction === 'out'
+            ? `${label} ${r.predicate} ${r.otherLabel}`
+            : `${r.otherLabel} ${r.predicate} ${label}`)
+          .join('; ')
+      : 'no known relationships yet';
+
+    return await callOpenAI([
+      {
+        role: 'system',
+        content: 'You are a concise knowledge analyst. Given an entity name, type, and its known graph relationships, write exactly one sentence (max 30 words) describing what this entity is or its role. No preamble, no quotes — just the sentence.',
+      },
+      {
+        role: 'user',
+        content: `Entity: "${label}" (${entityType})\nRelationships: ${relText}`,
+      },
+    ], { temperature: 0.3 });
+  } catch {
+    return null;
+  }
+}

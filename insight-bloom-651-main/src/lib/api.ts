@@ -80,6 +80,31 @@ export async function extractFromText(
   }
 }
 
+export interface NodeRelationship {
+  direction: 'out' | 'in';
+  predicate: string;
+  otherLabel: string;
+}
+
+export async function describeNode(
+  label: string,
+  entityType: string,
+  relationships: NodeRelationship[],
+): Promise<string | null> {
+  try {
+    const res = await fetch(`${API_BASE}/ai/describe-node`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label, entityType, relationships }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json() as { description: string | null };
+    return data.description ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export async function extractFromFile(runId: string, file: File): Promise<void> {
   const text = await file.text();
   return extractFromText(runId, text, file.name);

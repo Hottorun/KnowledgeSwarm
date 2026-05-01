@@ -7,6 +7,7 @@ import { broadcast } from '../sse';
 import {
   expandSubtree,
   extractTriplesFromChunk,
+  describeNode,
   isOpenAIConfigured,
   setRuntimeOpenAIKey,
   validateKeyFormat,
@@ -201,6 +202,29 @@ router.post('/runs/:runId/expand-subtree', async (req: Request, res: Response) =
     return res.json({ summary, newTriplesPersisted: triples.length });
   } catch (err) {
     return handleRouteError(res, err, 'Expansion failed');
+  }
+});
+
+const describeNodeSchema = z.object({
+  label: z.string().min(1),
+  entityType: z.string().optional().default('Entity'),
+  relationships: z.array(z.object({
+    direction: z.enum(['out', 'in']),
+    predicate: z.string(),
+    otherLabel: z.string(),
+  })).optional().default([]),
+});
+
+router.post('/describe-node', async (req: Request, res: Response) => {
+  try {
+    const { label, entityType, relationships } = describeNodeSchema.parse(req.body);
+    if (!isOpenAIConfigured()) {
+      return res.json({ description: null });
+    }
+    const description = await describeNode(label, entityType, relationships);
+    return res.json({ description });
+  } catch (err) {
+    return handleRouteError(res, err, 'Description failed');
   }
 });
 

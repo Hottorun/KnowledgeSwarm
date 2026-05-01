@@ -1,5 +1,6 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { motion } from 'framer-motion';
+import { describeNode } from '@/lib/api';
 
 export interface NodeRelationship {
   direction: 'out' | 'in';
@@ -35,7 +36,22 @@ const actions = [
 
 export function NodeInputBox({ nodeLabel, entityType, relationships = [], position, onAction, onClose, onDelete, addedByAI }: NodeInputBoxProps) {
   const [prompt, setPrompt] = useState('');
+  const [aiDescription, setAiDescription] = useState<string | null>(null);
+  const [descLoading, setDescLoading] = useState(true);
   const [dragOffset, setDragOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+
+  useEffect(() => {
+    let cancelled = false;
+    setDescLoading(true);
+    setAiDescription(null);
+    describeNode(nodeLabel, entityType ?? 'Entity', relationships).then(desc => {
+      if (!cancelled) {
+        setAiDescription(desc);
+        setDescLoading(false);
+      }
+    });
+    return () => { cancelled = true; };
+  }, [nodeLabel, entityType, relationships]);
   const [isDragging, setIsDragging] = useState(false);
   const [dragStart, setDragStart] = useState<{ x: number; y: number } | null>(null);
 
@@ -158,6 +174,22 @@ export function NodeInputBox({ nodeLabel, entityType, relationships = [], positi
               ))}
             </div>
           )}
+        </div>
+
+        {/* AI Description */}
+        <div className="px-4 py-2.5" style={{ borderBottom: '1px solid var(--border)' }}>
+          {descLoading ? (
+            <div className="flex items-center gap-1.5">
+              <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" className="animate-spin" style={{ color: 'oklch(0.58 0.16 255)', flexShrink: 0 }}>
+                <path d="M8 0 L9.5 6 L16 8 L9.5 10 L8 16 L6.5 10 L0 8 L6.5 6 Z" />
+              </svg>
+              <span className="text-[11px]" style={{ color: 'var(--muted-foreground)' }}>Generating summary…</span>
+            </div>
+          ) : aiDescription ? (
+            <p className="text-[11px] leading-relaxed" style={{ color: 'var(--muted-foreground)' }}>
+              {aiDescription}
+            </p>
+          ) : null}
         </div>
 
         {/* Prompt input */}
