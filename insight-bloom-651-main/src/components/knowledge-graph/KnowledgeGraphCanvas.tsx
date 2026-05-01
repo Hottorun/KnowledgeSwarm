@@ -1037,7 +1037,7 @@ function KnowledgeGraphCanvasInner() {
       )}
 
       {/* Loading blob — shown from submit until first node arrives */}
-      <LoadingBlob isVisible={isProcessing} />
+      <LoadingBlob isVisible={isProcessing} reasoningSteps={reasoningSteps} />
 
       {/* Node input box */}
       <AnimatePresence>
