@@ -793,7 +793,13 @@ function KnowledgeGraphCanvasInner() {
     }]);
 
     try {
-      const activeRunId = await createRun(text);
+      // Use the document name (or a short excerpt) as the run topic — never the
+      // full document text, which gets stored as the root context and injected
+      // into every extraction system prompt, blowing the token limit.
+      const runTopic = (documentName && documentName !== 'input.txt')
+        ? documentName.replace(/\.[^/.]+$/, '')
+        : text.slice(0, 80).trim();
+      const activeRunId = await createRun(runTopic);
       setRunId(activeRunId);
       connectRunStream(activeRunId);
       setIsEmpty(false);
