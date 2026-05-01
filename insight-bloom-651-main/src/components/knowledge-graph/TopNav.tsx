@@ -6,9 +6,11 @@ interface TopNavProps {
   connectionMode: boolean;
   onToggleFocus: () => void;
   onToggleConnection: () => void;
+  onSearchOpen: () => void;
+  graphLoaded: boolean;
 }
 
-export function TopNav(_: TopNavProps) {
+export function TopNav({ onSearchOpen, graphLoaded }: TopNavProps) {
   const [showProfile, setShowProfile] = useState(false);
 
   return (
@@ -35,6 +37,29 @@ export function TopNav(_: TopNavProps) {
           KnowledgeGraph
         </span>
       </div>
+
+      {/* Search + Profile */}
+      <div className="flex items-center gap-2">
+      {/* Search button — only when graph is loaded */}
+      <AnimatePresence>
+        {graphLoaded && (
+          <motion.button
+            initial={{ opacity: 0, scale: 0.85 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.85 }}
+            transition={{ duration: 0.18 }}
+            onClick={onSearchOpen}
+            className="w-8 h-8 rounded-xl flex items-center justify-center transition-colors hover:bg-accent"
+            style={{ background: 'var(--secondary)', border: '1px solid var(--border)' }}
+            title="Search graph (⌘K)"
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" style={{ color: 'var(--muted-foreground)' }}>
+              <circle cx="6.5" cy="6.5" r="4.5" stroke="currentColor" strokeWidth="1.5" />
+              <line x1="10" y1="10" x2="14" y2="14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+            </svg>
+          </motion.button>
+        )}
+      </AnimatePresence>
 
       {/* Profile */}
       <div className="relative">
@@ -74,6 +99,7 @@ export function TopNav(_: TopNavProps) {
             </motion.div>
           )}
         </AnimatePresence>
+      </div>
       </div>
     </div>
   );

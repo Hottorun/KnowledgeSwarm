@@ -17,6 +17,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 
 import { AnimatedBlob, LoadingBlob } from './AnimatedBlob';
 import { GraphNodeMemo, calcNodeDims, type GraphNodeData } from './GraphNode';
+import { GraphSearchPanel } from './GraphSearchPanel';
 import { NodeInputBox } from './NodeInputBox';
 import { SidePanel } from './SidePanel';
 import { TopNav } from './TopNav';
@@ -304,6 +305,7 @@ function KnowledgeGraphCanvasInner() {
   const [reasoningSteps, setReasoningSteps] = useState<AIReasoningStep[]>([]);
   const [runId, setRunId] = useState<string | null>(null);
   const [expandingNodeId, setExpandingNodeId] = useState<string | null>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
   const reactFlowInstance = useReactFlow();
 
   const nodeTypes = useMemo(() => ({ graphNode: GraphNodeMemo }), []);
@@ -354,6 +356,18 @@ function KnowledgeGraphCanvasInner() {
 
   // Keep edgesRef in sync so the layout debounce can read current edges
   useEffect(() => { edgesRef.current = edges; }, [edges]);
+
+  // ⌘K / Ctrl+K opens search
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault();
+        setSearchOpen(o => !o);
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []);
 
   // Sync expanding state into node data so GraphNode can render the blob animation
   useEffect(() => {
@@ -1167,6 +1181,29 @@ function KnowledgeGraphCanvasInner() {
     }
   }, [nodes, edges, reactFlowInstance]);
 
+  const handleFocusMultiple = useCallback((nodeIds: string[]) => {
+    if (!reactFlowInstance || nodeIds.length === 0) return;
+    const targets = nodes.filter(n => nodeIds.includes(n.id));
+    if (targets.length === 0) return;
+    const ids = new Set(nodeIds);
+    setHighlightedNodes(ids);
+    setExpandedSubtree(ids);
+    setPinnedExpansion(ids);
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    targets.forEach(n => {
+      minX = Math.min(minX, n.position.x - 120);
+      minY = Math.min(minY, n.position.y - 60);
+      maxX = Math.max(maxX, n.position.x + 240);
+      maxY = Math.max(maxY, n.position.y + 100);
+    });
+    setTimeout(() => {
+      reactFlowInstance.fitBounds(
+        { x: minX, y: minY, width: maxX - minX, height: maxY - minY },
+        { padding: 0.35, duration: 700 }
+      );
+    }, 50);
+  }, [nodes, reactFlowInstance]);
+
   const handlePaneClick = useCallback(() => {
     setSelectedNode(null);
     setInputBoxPos(null);
@@ -1202,6 +1239,16 @@ function KnowledgeGraphCanvasInner() {
         connectionMode={connectionMode}
         onToggleFocus={() => setFocusMode(f => !f)}
         onToggleConnection={() => setConnectionMode(c => !c)}
+        onSearchOpen={() => setSearchOpen(true)}
+        graphLoaded={!isEmpty}
+      />
+
+      <GraphSearchPanel
+        nodes={nodes}
+        isOpen={searchOpen}
+        onClose={() => setSearchOpen(false)}
+        onFocusNode={handleNodeFocus}
+        onFocusMultiple={handleFocusMultiple}
       />
 
       {!isEmpty && <EdgeButton side="left" label="Contents" icon="📑" onClick={() => setLeftPanel(p => !p)} isActive={leftPanel} />}
