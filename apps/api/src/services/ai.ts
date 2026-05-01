@@ -364,6 +364,17 @@ STRICT RULES:
 - Type must be one of: Company, Person, Product, Market, Technology, Location, Concept, Entity
 - Do NOT duplicate labels from the EXISTING list
 
+SPO SCHEMA — NON-NEGOTIABLE:
+Items are OBJECTS (values, entities). Attribute names are PREDICATES (edges) — they MUST NOT appear as node labels.
+FORBIDDEN: any item whose label is "<subject> <attribute>", "<attribute> of <subject>", or a rewording of the parent + attribute.
+  ✗ { label: "Tim Cook Age" }          ← attribute name masquerading as a node
+  ✗ { label: "Apple Revenue" }         ← same pattern
+  ✗ { label: "Categories of Apple" }   ← meta-descriptor, not a real entity
+Extract the VALUE; Pass 2 will assign the predicate:
+  ✓ { label: "63 years", exact_value: 63, unit: "years" }  → predicate will be "age"
+  ✓ { label: "391 billion USD", exact_value: 391, unit: "billion USD" }  → predicate will be "revenue"
+  ✓ { label: "Cupertino, California" }  → predicate will be "headquarters"
+
 QUANTITATIVE DATA — NON-NEGOTIABLE:
 - If exact numbers are present in the research, copy them VERBATIM into the label AND into exact_value/unit fields. NEVER round, truncate, or summarize.
 - If a number is ambiguous, set exact_value to null and unit to null. Do NOT guess.
@@ -439,8 +450,18 @@ ${allWebContext.slice(0, 24).join('\n\n')}`;
 
 STRICT RULES:
 - Every item must connect to EXACTLY ONE parent from AVAILABLE PARENTS — no other IDs allowed
-- Predicates must be specific and meaningful: "includes", "founded_by", "has_ceo", "age", "located_in", "competes_with"
 - Never connect an item to itself${categoryDirective}
+
+PREDICATE — NON-NEGOTIABLE:
+The predicate is the SEMANTIC RELATIONSHIP label on the edge. It must name the attribute or relationship, never a generic connector.
+For attribute values (numbers, dates, locations), the predicate MUST be the attribute name itself:
+  ✓ Person   --(age)-----------> "63 years"
+  ✓ Company  --(revenue)-------> "391 billion USD"
+  ✓ Company  --(founded)-------> "1976"
+  ✓ Company  --(headquarters)--> "Cupertino, California"
+  ✗ Person   --(has)-----------> "63 years"          ← too generic
+  ✗ Company  --(relates_to)----> "391 billion USD"   ← meaningless
+For entity relationships use specific verbs: "founded_by", "acquired", "competes_with", "led_by", "includes", "located_in".
 
 Output JSON: { "connections": [{ "itemLabel": string, "parentId": string, "predicate": string, "confidence": number }] }`;
 
