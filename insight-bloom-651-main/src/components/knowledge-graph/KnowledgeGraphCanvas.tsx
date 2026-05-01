@@ -521,10 +521,7 @@ function KnowledgeGraphCanvasInner() {
 
   const [highlightedNodes, setHighlightedNodes] = useState<Set<string>>(new Set());
   const [aiHighlightedNodes, setAiHighlightedNodes] = useState<Set<string>>(new Set());
-  const [expandedSubtree, setExpandedSubtree] = useState<Set<string>>(new Set());
-  const [pinnedExpansion, setPinnedExpansion] = useState<Set<string>>(new Set());
   const [viewport, setViewport] = useState({ x: 0, y: 0, zoom: 1 });
-  const viewportDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const eventSourceRef = useRef<EventSource | null>(null);
   const nodePositionRef = useRef<Map<string, { x: number; y: number }>>(new Map());
@@ -594,45 +591,6 @@ function KnowledgeGraphCanvasInner() {
       return { ...n, data: { ...n.data, isExpanding: shouldExpand } };
     }));
   }, [expandingNodeId, setNodes]);
-
-  // Expand nodes visible in the current viewport, compact those that have panned out.
-  // Debounced so mid-gesture frames don't trigger unnecessary state updates.
-  useEffect(() => {
-    if (nodes.length <= 50) return;
-
-    if (viewportDebounceRef.current) clearTimeout(viewportDebounceRef.current);
-
-    viewportDebounceRef.current = setTimeout(() => {
-      if (viewport.zoom < 0.8) {
-        setExpandedSubtree(prev => (prev.size > 0 ? new Set() : prev));
-        setPinnedExpansion(prev => (prev.size > 0 ? new Set() : prev));
-        return;
-      }
-      if (viewport.zoom < 0.9) return; // hysteresis band — don't expand or collapse
-
-      const left = (-viewport.x) / viewport.zoom;
-      const top = (-viewport.y) / viewport.zoom;
-      const right = left + window.innerWidth / viewport.zoom;
-      const bottom = top + window.innerHeight / viewport.zoom;
-
-      const visibleIds = new Set<string>();
-      nodes.forEach(n => {
-        if (
-          n.position.x >= left - 200 && n.position.x <= right + 200 &&
-          n.position.y >= top - 200 && n.position.y <= bottom + 200
-        ) {
-          visibleIds.add(n.id);
-        }
-      });
-
-      setExpandedSubtree(prev => {
-        if (prev.size === visibleIds.size && [...visibleIds].every(id => prev.has(id))) return prev;
-        return visibleIds;
-      });
-    }, 120);
-
-    return () => { if (viewportDebounceRef.current) clearTimeout(viewportDebounceRef.current); };
-  }, [viewport, nodes]);
 
   // Assign a spiral position to a new node that has no known parent yet
   const assignSpiralPosition = useCallback((nodeId: string): { x: number; y: number } => {
@@ -1460,18 +1418,12 @@ function KnowledgeGraphCanvasInner() {
           maxY = Math.max(maxY, n.position.y + 100);
         });
 
-        // Pin the expansion so viewport-change logic can't override it
-        setExpandedSubtree(allDescendants);
-        setPinnedExpansion(allDescendants);
         setTimeout(() => {
           reactFlowInstance.fitBounds(
             { x: minX, y: minY, width: maxX - minX, height: maxY - minY },
             { padding: 0.3, duration: 600 }
           );
         }, 50);
-      } else {
-        setExpandedSubtree(allDescendants);
-        setPinnedExpansion(allDescendants);
       }
     }
   }, [nodes, edges, reactFlowInstance]);
@@ -1482,8 +1434,6 @@ function KnowledgeGraphCanvasInner() {
     if (targets.length === 0) return;
     const ids = new Set(nodeIds);
     setHighlightedNodes(ids);
-    setExpandedSubtree(ids);
-    setPinnedExpansion(ids);
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     targets.forEach(n => {
       minX = Math.min(minX, n.position.x - 120);
@@ -1640,31 +1590,20 @@ function KnowledgeGraphCanvasInner() {
     setInputBoxPos(null);
     setHighlightedNodes(new Set());
     setAiHighlightedNodes(new Set());
-    setExpandedSubtree(new Set());
     setLeftPanel(false);
-    // Clicking empty pane re-clusters: drop back to neighborhood + cluster bubble
+    // Clicking empty pane re-clusters: drop back to neighborhood
     setShowAllNodes(false);
   }, []);
 
   const nodesWithHighlight = useMemo(() => {
-    const isCompact = nodes.length > 50;
-    const childCount = new Map<string, number>();
-    if (isCompact) {
-      edges.forEach(e => childCount.set(e.source, (childCount.get(e.source) || 0) + 1));
-    }
-    const expanded = pinnedExpansion.size > 0
-      ? new Set([...expandedSubtree, ...pinnedExpansion])
-      : expandedSubtree;
     return nodes.map(n => ({
       ...n,
-      zIndex: expanded.has(n.id) ? 10 : 0,
       data: {
         ...n.data,
         isHighlighted: highlightedNodes.has(n.id) || aiHighlightedNodes.has(n.id),
-        compact: isCompact && (n.data as GraphNodeData).nodeType !== 'root' && (childCount.get(n.id) || 0) < 3 && !expanded.has(n.id),
       },
     }));
-  }, [nodes, edges, highlightedNodes, aiHighlightedNodes, expandedSubtree, pinnedExpansion]);
+  }, [nodes, highlightedNodes, aiHighlightedNodes]);
 
   // Neighborhood rendering: only mount the active node + its 1-hop neighbors.
   // Each rendered node carries a `hiddenCount` badge showing how many of its
