@@ -64,30 +64,44 @@ export function calcNodeDims(
   return { ...base, w, h };
 }
 
-// Monochrome dot intensity by depth — subtle hierarchy without rainbow noise.
-const depthDot: Record<string, string> = {
-  root:     'oklch(0.20 0.02 260)',  // near-black
-  topic:    'oklch(0.38 0.02 260)',
-  subtopic: 'oklch(0.55 0.02 260)',
-  detail:   'oklch(0.70 0.02 260)',  // light grey
+// Soft pastel palette — high lightness, low chroma so colors feel calm.
+// Order: deep enough for the dot, faded for the glow, barely-there for the bg tint.
+interface AccentColor { dot: string; glow: string; tint: string; text: string }
+
+const entityAccent: Record<string, AccentColor> = {
+  Company:      { dot: 'oklch(0.72 0.10 250)', glow: 'oklch(0.72 0.10 250 / 22%)', tint: 'oklch(0.72 0.10 250 / 7%)',  text: 'oklch(0.45 0.12 250)' }, // soft blue
+  Organization: { dot: 'oklch(0.72 0.10 280)', glow: 'oklch(0.72 0.10 280 / 22%)', tint: 'oklch(0.72 0.10 280 / 7%)',  text: 'oklch(0.45 0.12 280)' }, // soft indigo
+  Person:       { dot: 'oklch(0.78 0.10 145)', glow: 'oklch(0.78 0.10 145 / 22%)', tint: 'oklch(0.78 0.10 145 / 7%)',  text: 'oklch(0.45 0.12 145)' }, // soft sage
+  Market:       { dot: 'oklch(0.80 0.11 70)',  glow: 'oklch(0.80 0.11 70 / 22%)',  tint: 'oklch(0.80 0.11 70 / 7%)',   text: 'oklch(0.50 0.13 60)'  }, // soft amber
+  Technology:   { dot: 'oklch(0.74 0.10 310)', glow: 'oklch(0.74 0.10 310 / 22%)', tint: 'oklch(0.74 0.10 310 / 7%)',  text: 'oklch(0.45 0.13 310)' }, // soft lavender
+  Product:      { dot: 'oklch(0.78 0.10 0)',   glow: 'oklch(0.78 0.10 0 / 22%)',   tint: 'oklch(0.78 0.10 0 / 7%)',    text: 'oklch(0.50 0.13 5)'   }, // soft pink
+  Event:        { dot: 'oklch(0.82 0.11 95)',  glow: 'oklch(0.82 0.11 95 / 22%)',  tint: 'oklch(0.82 0.11 95 / 7%)',   text: 'oklch(0.50 0.13 90)'  }, // soft yellow
+  Location:     { dot: 'oklch(0.78 0.09 195)', glow: 'oklch(0.78 0.09 195 / 22%)', tint: 'oklch(0.78 0.09 195 / 7%)',  text: 'oklch(0.45 0.11 195)' }, // soft teal
+  Regulation:   { dot: 'oklch(0.74 0.10 25)',  glow: 'oklch(0.74 0.10 25 / 22%)',  tint: 'oklch(0.74 0.10 25 / 7%)',   text: 'oklch(0.50 0.13 25)'  }, // soft coral
+  Document:     { dot: 'oklch(0.76 0.06 230)', glow: 'oklch(0.76 0.06 230 / 22%)', tint: 'oklch(0.76 0.06 230 / 7%)',  text: 'oklch(0.45 0.08 230)' }, // soft slate-blue
+  Concept:      { dot: 'oklch(0.74 0.04 260)', glow: 'oklch(0.74 0.04 260 / 22%)', tint: 'oklch(0.74 0.04 260 / 7%)',  text: 'oklch(0.45 0.05 260)' }, // soft slate
+  Topic:        { dot: 'oklch(0.74 0.04 260)', glow: 'oklch(0.74 0.04 260 / 22%)', tint: 'oklch(0.74 0.04 260 / 7%)',  text: 'oklch(0.45 0.05 260)' },
+  Entity:       { dot: 'oklch(0.74 0.04 260)', glow: 'oklch(0.74 0.04 260 / 22%)', tint: 'oklch(0.74 0.04 260 / 7%)',  text: 'oklch(0.45 0.05 260)' },
 };
 
-const depthGlow: Record<string, string> = {
-  root:     'oklch(0.20 0.02 260 / 18%)',
-  topic:    'oklch(0.38 0.02 260 / 14%)',
-  subtopic: 'oklch(0.55 0.02 260 / 10%)',
-  detail:   'oklch(0.70 0.02 260 / 8%)',
-};
+const fallbackAccent: AccentColor = entityAccent.Concept;
+
+function getAccent(description?: string): AccentColor {
+  if (!description) return fallbackAccent;
+  const key = Object.keys(entityAccent).find(k => description.toLowerCase().includes(k.toLowerCase()));
+  return key ? entityAccent[key] : fallbackAccent;
+}
 
 function GraphNodeComponent({ data, selected }: NodeProps) {
   const nodeData = data as unknown as GraphNodeData;
   const style = typeStyles[nodeData.nodeType] || typeStyles.detail;
-  // Show entity-type as a subtle text badge (no color); pass hasAccent=true to width calc
-  // so badge text fits without truncation.
   const hasBadge = !!nodeData.description;
   const dims = calcNodeDims(nodeData.nodeType, nodeData.label, nodeData.description, hasBadge);
-  const dot = depthDot[nodeData.nodeType] ?? depthDot.detail;
-  const glow = depthGlow[nodeData.nodeType] ?? depthGlow.detail;
+  const accent = getAccent(nodeData.description);
+  const dot = accent.dot;
+  const glow = accent.glow;
+  const tint = accent.tint;
+  const accentText = accent.text;
   const isHighlighted = nodeData.isHighlighted === true;
   const isCompact = nodeData.compact === true;
   const [hovered, setHovered] = useState(false);
@@ -200,7 +214,7 @@ function GraphNodeComponent({ data, selected }: NodeProps) {
           paddingLeft: dims.px, paddingRight: dims.px,
           paddingTop: dims.py, paddingBottom: dims.py,
           borderRadius: dims.r,
-          background: 'var(--kg-node-bg)',
+          background: `linear-gradient(135deg, ${tint}, var(--kg-node-bg))`,
           border: `1.5px solid ${cardBorder}`,
           boxShadow: cardShadow,
           opacity: isCompact ? 0 : 1,
@@ -209,9 +223,11 @@ function GraphNodeComponent({ data, selected }: NodeProps) {
           display: 'flex', flexDirection: 'column', justifyContent: 'center',
         }}
         whileHover={isCompact ? {} : {
-          boxShadow: `0 0 16px 5px ${glow}, 0 4px 16px rgba(0,0,0,0.06)`,
-          y: -1,
+          scale: 1.04,
+          boxShadow: `0 0 18px 6px ${glow}, 0 6px 18px rgba(0,0,0,0.08)`,
+          y: -2,
         }}
+        transition={{ type: 'spring', stiffness: 380, damping: 26 }}
       >
         <div style={{ display: 'flex', alignItems: nodeData.label.length > LABEL_WRAP_AT ? 'flex-start' : 'center', gap: 8 }}>
           <div style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0, background: dot, marginTop: nodeData.label.length > LABEL_WRAP_AT ? 3 : 0 }} />
@@ -232,8 +248,8 @@ function GraphNodeComponent({ data, selected }: NodeProps) {
             <span
               className="ml-auto text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 uppercase tracking-wide"
               style={{
-                background: 'var(--muted)',
-                color: 'var(--muted-foreground)',
+                background: tint,
+                color: accentText,
                 letterSpacing: '0.04em',
               }}
             >

@@ -150,6 +150,56 @@ export interface ExpandSubtreeResult {
   searchResultCount: number;
 }
 
+// When the LLM's own decomposition says the property OWNER is not the root,
+// reject any triple that jams the property directly onto the root node. The
+// model occasionally ignores Rule 0 even when it correctly fills out the
+// decomposition block, so this is the belt-and-suspenders enforcement.
+function enforceMultiHopChain(
+  triples: RawExtractedTriple[],
+  rootLabel: string,
+  decomp?: {
+    attribute?: string;
+    owner?: string;
+    ownerIsRoot?: boolean;
+    intermediateNeeded?: string | null;
+  },
+): RawExtractedTriple[] {
+  if (!decomp) return triples;
+  if (decomp.ownerIsRoot !== false) return triples;
+
+  const norm = (s: string) => s.toLowerCase().trim();
+  const root = norm(rootLabel);
+  const attribute = decomp.attribute ? norm(decomp.attribute) : '';
+  const owner = decomp.owner ? norm(decomp.owner) : '';
+  // Tokenize attribute into words ≥3 chars to match against snake_case predicates
+  const attrTokens = attribute
+    .split(/[\s_]+/)
+    .filter(t => t.length >= 3 && t !== 'the' && t !== 'and' && t !== 'for');
+  const ownerTokens = owner
+    .split(/[\s_]+/)
+    .filter(t => t.length >= 3 && t !== 'the' && t !== 'and' && t !== 'for');
+
+  return triples.filter(t => {
+    if (norm(t.subject) !== root) return true;
+    const predicate = norm(t.predicate);
+    const object = norm(t.object);
+    // If the root is the subject, the predicate must NOT contain attribute keywords
+    // unless the object is the intermediate (i.e. the chain root → owner).
+    const predicateMentionsAttribute = attrTokens.some(tok => predicate.includes(tok));
+    const predicateMentionsOwner = ownerTokens.some(tok => predicate.includes(tok));
+    const objectIsIntermediate = decomp.intermediateNeeded
+      ? object.includes(norm(decomp.intermediateNeeded))
+      : ownerTokens.some(tok => object.includes(tok));
+    // Drop: root → ceo_age → "47"  (predicate has both owner and attribute)
+    // Drop: root → has_ceo_age → "47"
+    // Drop: root → age → "47"      (predicate is the attribute itself)
+    // Keep: root → has_ceo → "Jane Smith"  (object is intermediate, predicate is just owner relation)
+    if (predicateMentionsAttribute && predicateMentionsOwner) return false;
+    if (predicateMentionsAttribute && !objectIsIntermediate) return false;
+    return true;
+  });
+}
+
 // BFS over the LLM's new triples starting from rootLabel. Drops triples whose
 // endpoints can't be reached from the root through other new triples — this is
 // what kills orphan nodes that would otherwise float in the canvas with no edge
@@ -365,12 +415,23 @@ Every new node must be reachable from "${rootNode.label}" through a chain of new
 
 Also write a 2–3 sentence summary of the most important new findings specifically about "${rootNode.label}".
 
+You MUST output the questionDecomposition block FIRST. This forces you to think through the chain structure before writing triples. The block is mandatory whether or not the user asked a question.
+
 Output JSON: {
+  "questionDecomposition": {
+    "attribute": string,        // what the user asks about, or the broadest theme if no question (e.g. "categories of ${rootNode.label}")
+    "owner": string,            // who possesses the attribute — "${rootNode.label}" itself, or a sub-entity by name/role
+    "ownerIsRoot": boolean,     // true ⇔ owner === "${rootNode.label}"
+    "intermediateNeeded": string | null,  // if ownerIsRoot is false, the EXACT label of the intermediate node you will create (or reuse from the existing graph)
+    "plan": string              // 1 sentence: how the chain will look, e.g. "${rootNode.label} → has_ceo → 'Jane Smith' → age → '47'"
+  },
   "summary": string,
   "newRelationships": [
     { "subject": string, "predicate": string, "object": string, "subjectType": string, "objectType": string, "confidence": number, "sourceIndex": number }
   ]
-}`;
+}
+
+Self-check before returning: if questionDecomposition.ownerIsRoot is false, then NO triple may have "${rootNode.label}" as subject AND the attribute keyword in the predicate — instead "${rootNode.label}" must be the subject of a triple whose object is the intermediateNeeded label.`;
 
   const synthesisRaw = await callOpenAI(
     [{ role: 'user', content: synthesisPrompt }],
@@ -380,9 +441,17 @@ Output JSON: {
   const synthParsed = JSON.parse(synthesisRaw) as {
     summary?: string;
     newRelationships?: Array<Record<string, unknown>>;
+    questionDecomposition?: {
+      attribute?: string;
+      owner?: string;
+      ownerIsRoot?: boolean;
+      intermediateNeeded?: string | null;
+      plan?: string;
+    };
   };
 
   const summary = synthParsed.summary || `Expanded branch for "${rootNode.label}" using web research.`;
+  const decomp = synthParsed.questionDecomposition;
 
   const rawTriples: RawExtractedTriple[] = (synthParsed.newRelationships || [])
     .filter(r => r.subject && r.predicate && r.object)
@@ -404,7 +473,8 @@ Output JSON: {
       };
     });
 
-  const newTriples = filterToConnectedTriples(rawTriples, rootNode.label);
+  const cleanedTriples = enforceMultiHopChain(rawTriples, rootNode.label, decomp);
+  const newTriples = filterToConnectedTriples(cleanedTriples, rootNode.label);
 
   return {
     summary,

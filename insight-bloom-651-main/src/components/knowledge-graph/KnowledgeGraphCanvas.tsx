@@ -30,7 +30,11 @@ type GraphLayoutNode = Node<GraphNodeData>;
 
 // ── Force-directed layout ─────────────────────────────────────────────────────
 
-function forceDirectedLayout(layoutNodes: GraphLayoutNode[], layoutEdges: Edge[]): GraphLayoutNode[] {
+function forceDirectedLayout(
+  layoutNodes: GraphLayoutNode[],
+  layoutEdges: Edge[],
+  manualPins: Set<string> = new Set(),
+): GraphLayoutNode[] {
   if (layoutNodes.length === 0) return layoutNodes;
 
   const REPULSION = 28000;
@@ -46,7 +50,9 @@ function forceDirectedLayout(layoutNodes: GraphLayoutNode[], layoutEdges: Edge[]
     layoutNodes.map(n => [n.id, { x: 0, y: 0 }])
   );
   const pinned = new Set(
-    layoutNodes.filter(n => (n.data as GraphNodeData).nodeType === 'root').map(n => n.id)
+    layoutNodes
+      .filter(n => (n.data as GraphNodeData).nodeType === 'root' || manualPins.has(n.id))
+      .map(n => n.id),
   );
 
   for (let iter = 0; iter < ITERATIONS; iter++) {
@@ -125,13 +131,18 @@ function getNodeDims(n: GraphLayoutNode): { w: number; h: number } {
   return calcNodeDims(d.nodeType, d.label, d.description, true);
 }
 
-function resolveOverlaps(layoutNodes: GraphLayoutNode[]): GraphLayoutNode[] {
+function resolveOverlaps(
+  layoutNodes: GraphLayoutNode[],
+  manualPins: Set<string> = new Set(),
+): GraphLayoutNode[] {
   if (layoutNodes.length < 2) return layoutNodes;
 
   const pos = new Map(layoutNodes.map(n => [n.id, { x: n.position.x, y: n.position.y }]));
   const dims = new Map(layoutNodes.map(n => [n.id, getNodeDims(n)]));
   const pinned = new Set(
-    layoutNodes.filter(n => (n.data as GraphNodeData).nodeType === 'root').map(n => n.id)
+    layoutNodes
+      .filter(n => (n.data as GraphNodeData).nodeType === 'root' || manualPins.has(n.id))
+      .map(n => n.id),
   );
 
   // Overshoot factor: push apart slightly more than the bare overlap so the
@@ -186,8 +197,12 @@ function resolveOverlaps(layoutNodes: GraphLayoutNode[]): GraphLayoutNode[] {
   return layoutNodes.map(n => ({ ...n, position: pos.get(n.id) ?? n.position }));
 }
 
-function layout(nodes: GraphLayoutNode[], edges: Edge[]): GraphLayoutNode[] {
-  return resolveOverlaps(forceDirectedLayout(nodes, edges));
+function layout(
+  nodes: GraphLayoutNode[],
+  edges: Edge[],
+  manualPins: Set<string> = new Set(),
+): GraphLayoutNode[] {
+  return resolveOverlaps(forceDirectedLayout(nodes, edges, manualPins), manualPins);
 }
 
 // ── SSE payload types ─────────────────────────────────────────────────────────
@@ -301,6 +316,9 @@ function KnowledgeGraphCanvasInner() {
   const expansionDepthRef = useRef<number>(0);
   const layoutDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const edgesRef = useRef<Edge[]>([]);
+  // Nodes the user has manually dragged — pinned so re-layouts after expansion
+  // don't snap them back to their physics-determined position.
+  const userMovedRef = useRef<Set<string>>(new Set());
   // Buffers for initial-load SSE events — committed all-at-once after layout so nodes
   // never appear in unsorted positions.
   const pendingNodesRef = useRef<Map<string, GraphLayoutNode>>(new Map());
@@ -463,6 +481,7 @@ function KnowledgeGraphCanvasInner() {
           const laidOut = layout(
             [...(nodesRef.current as GraphLayoutNode[]), ...pNodes],
             allEdges,
+            userMovedRef.current,
           ) as Node[];
 
           setNodes(assignAnimDelays(laidOut, allEdges));
@@ -477,7 +496,7 @@ function KnowledgeGraphCanvasInner() {
           });
         } else {
           // Expansion: just re-layout existing committed nodes
-          setNodes(prev => layout(prev as GraphLayoutNode[], edgesRef.current) as Node[]);
+          setNodes(prev => layout(prev as GraphLayoutNode[], edgesRef.current, userMovedRef.current) as Node[]);
         }
       }, 600);
     });
@@ -574,6 +593,7 @@ function KnowledgeGraphCanvasInner() {
     placeholderNodesRef.current.clear();
     pendingNodesRef.current.clear();
     pendingEdgesRef.current.clear();
+    userMovedRef.current.clear();
     setNodes([]);
     setEdges([]);
     setReasoningSteps([]);
@@ -694,6 +714,12 @@ function KnowledgeGraphCanvasInner() {
       setInputBoxPos(null);
     }
   }, [selectedNode]);
+
+  const handleNodeDragStop = useCallback((_: React.MouseEvent, node: Node) => {
+    // Pin the dragged node so future re-layouts don't move it
+    userMovedRef.current.add(node.id);
+    nodePositionRef.current.set(node.id, { x: node.position.x, y: node.position.y });
+  }, []);
 
   const handleNodeAction = useCallback(async (action: string, prompt: string) => {
     if (!selectedNode) return;
@@ -928,36 +954,6 @@ function KnowledgeGraphCanvasInner() {
     }
   }, [nodes, edges, reactFlowInstance]);
 
-  const handleLoadSample = useCallback(() => {
-    const sampleNodes: GraphLayoutNode[] = [
-      { id: 'n1', type: 'graphNode', position: { x: 0, y: 0 },     data: { label: 'AI',                                        nodeType: 'root',     description: undefined } },
-      { id: 'n2', type: 'graphNode', position: { x: 250, y: -80 },  data: { label: 'Machine Learning',                          nodeType: 'topic',    description: 'Topic' } },
-      { id: 'n3', type: 'graphNode', position: { x: 250, y: 80 },   data: { label: 'Natural Language Processing',               nodeType: 'topic',    description: 'Topic' } },
-      { id: 'n4', type: 'graphNode', position: { x: 500, y: -160 }, data: { label: 'Large Language Model Training',             nodeType: 'subtopic', description: 'Technology' } },
-      { id: 'n5', type: 'graphNode', position: { x: 500, y: -40 },  data: { label: 'Retrieval Augmented Generation System',     nodeType: 'subtopic', description: 'Technology' } },
-      { id: 'n6', type: 'graphNode', position: { x: 500, y: 80 },   data: { label: 'Transformer Architecture Design',           nodeType: 'subtopic', description: 'Concept' } },
-      { id: 'n7', type: 'graphNode', position: { x: 500, y: 200 },  data: { label: 'OpenAI',                                    nodeType: 'subtopic', description: 'Company' } },
-      { id: 'n8', type: 'graphNode', position: { x: 750, y: -200 }, data: { label: 'Gradient descent optimisation loop',        nodeType: 'detail',   description: 'Concept' } },
-      { id: 'n9', type: 'graphNode', position: { x: 750, y: -80 },  data: { label: 'Vector database',                          nodeType: 'detail',   description: 'Technology' } },
-      { id: 'n10',type: 'graphNode', position: { x: 750, y: 40 },   data: { label: 'Multi-head self-attention mechanism',       nodeType: 'detail',   description: 'Concept' } },
-    ];
-    const sampleEdges: Edge[] = [
-      { id: 'e1-2',  source: 'n1', target: 'n2',  label: 'includes',   type: 'floating' },
-      { id: 'e1-3',  source: 'n1', target: 'n3',  label: 'includes',   type: 'floating' },
-      { id: 'e2-4',  source: 'n2', target: 'n4',  label: 'uses',       type: 'floating' },
-      { id: 'e2-5',  source: 'n2', target: 'n5',  label: 'uses',       type: 'floating' },
-      { id: 'e3-6',  source: 'n3', target: 'n6',  label: 'built on',   type: 'floating' },
-      { id: 'e3-7',  source: 'n3', target: 'n7',  label: 'pioneered by', type: 'floating' },
-      { id: 'e4-8',  source: 'n4', target: 'n8',  label: 'requires',   type: 'floating' },
-      { id: 'e5-9',  source: 'n5', target: 'n9',  label: 'relies on',  type: 'floating' },
-      { id: 'e6-10', source: 'n6', target: 'n10', label: 'contains',   type: 'floating' },
-    ];
-    setNodes(assignAnimDelays(sampleNodes, sampleEdges));
-    setEdges(sampleEdges);
-    setIsEmpty(false);
-    setTimeout(() => reactFlowInstance.fitView({ padding: 0.2, duration: 400 }), 50);
-  }, [setNodes, setEdges, reactFlowInstance]);
-
   const handlePaneClick = useCallback(() => {
     setSelectedNode(null);
     setInputBoxPos(null);
@@ -993,7 +989,6 @@ function KnowledgeGraphCanvasInner() {
         connectionMode={connectionMode}
         onToggleFocus={() => setFocusMode(f => !f)}
         onToggleConnection={() => setConnectionMode(c => !c)}
-        onLoadSample={handleLoadSample}
       />
 
       <EdgeButton side="left" label="Contents" icon="📑" onClick={() => setLeftPanel(p => !p)} isActive={leftPanel} />
@@ -1006,6 +1001,9 @@ function KnowledgeGraphCanvasInner() {
         onEdgesChange={onEdgesChange}
         onNodeClick={handleNodeClick}
         onNodeDragStart={handleNodeDragStart}
+        onNodeDragStop={handleNodeDragStop}
+        nodesDraggable
+        nodesConnectable={false}
         onPaneClick={handlePaneClick}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}

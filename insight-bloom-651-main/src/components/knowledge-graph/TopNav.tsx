@@ -6,10 +6,9 @@ interface TopNavProps {
   connectionMode: boolean;
   onToggleFocus: () => void;
   onToggleConnection: () => void;
-  onLoadSample?: () => void;
 }
 
-export function TopNav({ onLoadSample }: TopNavProps) {
+export function TopNav(_: TopNavProps) {
   const [showProfile, setShowProfile] = useState(false);
 
   return (
@@ -35,15 +34,6 @@ export function TopNav({ onLoadSample }: TopNavProps) {
         <span className="text-sm font-semibold" style={{ fontFamily: 'var(--font-display)', color: 'var(--foreground)' }}>
           KnowledgeGraph
         </span>
-        {onLoadSample && (
-          <button
-            onClick={onLoadSample}
-            className="ml-3 px-3 py-1 rounded-lg text-xs font-medium transition-colors hover:bg-accent"
-            style={{ background: 'var(--secondary)', border: '1px solid var(--border)', color: 'var(--muted-foreground)' }}
-          >
-            Sample Data
-          </button>
-        )}
       </div>
 
       {/* Profile */}
