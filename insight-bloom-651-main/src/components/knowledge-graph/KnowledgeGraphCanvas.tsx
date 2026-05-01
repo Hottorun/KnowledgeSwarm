@@ -306,6 +306,146 @@ function formatPredicateLabel(predicate: string): string {
   return predicate.replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+function GraphMiniMap({
+  nodes,
+  viewport,
+  onNodeClick,
+  onZoomIn,
+  onZoomOut,
+}: {
+  nodes: Node[];
+  viewport: { x: number; y: number; zoom: number };
+  onNodeClick: (node: Node) => void;
+  onZoomIn: () => void;
+  onZoomOut: () => void;
+}) {
+  const mapNodes = useMemo(() => {
+    if (nodes.length === 0) return [];
+
+    const xs = nodes.map(node => node.position.x);
+    const ys = nodes.map(node => node.position.y);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+    const width = Math.max(maxX - minX, 1);
+    const height = Math.max(maxY - minY, 1);
+
+    return nodes.map(node => ({
+      node,
+      x: 8 + ((node.position.x - minX) / width) * 84,
+      y: 8 + ((node.position.y - minY) / height) * 84,
+    }));
+  }, [nodes]);
+
+  const viewportBox = useMemo(() => {
+    if (nodes.length === 0 || typeof window === 'undefined') return null;
+
+    const xs = nodes.map(node => node.position.x);
+    const ys = nodes.map(node => node.position.y);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+    const width = Math.max(maxX - minX, 1);
+    const height = Math.max(maxY - minY, 1);
+    const worldLeft = -viewport.x / viewport.zoom;
+    const worldTop = -viewport.y / viewport.zoom;
+    const worldWidth = window.innerWidth / viewport.zoom;
+    const worldHeight = window.innerHeight / viewport.zoom;
+
+    return {
+      left: Math.max(0, Math.min(100, 8 + ((worldLeft - minX) / width) * 84)),
+      top: Math.max(0, Math.min(100, 8 + ((worldTop - minY) / height) * 84)),
+      width: Math.max(4, Math.min(92, (worldWidth / width) * 84)),
+      height: Math.max(4, Math.min(92, (worldHeight / height) * 84)),
+    };
+  }, [nodes, viewport]);
+
+  if (nodes.length === 0) return null;
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: 8 }}
+      whileHover={{ width: 248, height: 184 }}
+      transition={{ duration: 0.18 }}
+      className="fixed bottom-5 left-4 z-30 overflow-hidden rounded-xl"
+      style={{
+        width: 184,
+        height: 136,
+        background: 'var(--kg-node-bg)',
+        border: '1px solid var(--kg-node-border)',
+        boxShadow: 'var(--kg-shadow-md)',
+        backdropFilter: 'blur(18px)',
+      }}
+      onPointerDown={event => event.stopPropagation()}
+      onClick={event => event.stopPropagation()}
+    >
+      <div className="absolute inset-2 bottom-9 rounded-lg overflow-hidden" style={{ background: 'var(--background)' }}>
+        {viewportBox && (
+          <div
+            className="absolute rounded-sm pointer-events-none"
+            style={{
+              left: `${viewportBox.left}%`,
+              top: `${viewportBox.top}%`,
+              width: `${viewportBox.width}%`,
+              height: `${viewportBox.height}%`,
+              border: '1px solid var(--primary)',
+              background: 'color-mix(in oklch, var(--primary) 10%, transparent)',
+            }}
+          />
+        )}
+        {mapNodes.map(({ node, x, y }) => (
+          <button
+            key={node.id}
+            type="button"
+            title={(node.data as GraphNodeData).label}
+            aria-label={`Go to ${(node.data as GraphNodeData).label}`}
+            onClick={() => onNodeClick(node)}
+            className="absolute rounded-full transition-transform hover:scale-150 focus:outline-none focus:ring-2 focus:ring-primary"
+            style={{
+              left: `${x}%`,
+              top: `${y}%`,
+              width: 5,
+              height: 5,
+              marginLeft: -2.5,
+              marginTop: -2.5,
+              background: '#000',
+            }}
+          />
+        ))}
+      </div>
+      <div className="absolute left-2 right-2 bottom-2 flex items-center justify-between gap-2">
+        <span className="text-[10px] font-medium truncate" style={{ color: 'var(--muted-foreground)' }}>
+          {nodes.length} nodes
+        </span>
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={onZoomOut}
+            className="w-7 h-6 rounded-md text-sm font-semibold transition-colors hover:bg-accent"
+            style={{ color: 'var(--foreground)', border: '1px solid var(--border)' }}
+            aria-label="Zoom out"
+          >
+            -
+          </button>
+          <button
+            type="button"
+            onClick={onZoomIn}
+            className="w-7 h-6 rounded-md text-sm font-semibold transition-colors hover:bg-accent"
+            style={{ color: 'var(--foreground)', border: '1px solid var(--border)' }}
+            aria-label="Zoom in"
+          >
+            +
+          </button>
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 function KnowledgeGraphCanvasInner() {
@@ -1597,6 +1737,23 @@ function KnowledgeGraphCanvasInner() {
   const deferredNodes = useDeferredValue(visibleNodes);
   const deferredEdges = useDeferredValue(visibleEdges);
 
+  const handleMiniMapNodeClick = useCallback((node: Node) => {
+    const measured = node.measured as { width?: number; height?: number } | undefined;
+    reactFlowInstance.setCenter(
+      node.position.x + (measured?.width ?? 160) / 2,
+      node.position.y + (measured?.height ?? 70) / 2,
+      { zoom: Math.max(viewport.zoom, 0.9), duration: 450 },
+    );
+  }, [reactFlowInstance, viewport.zoom]);
+
+  const handleMiniMapZoomIn = useCallback(() => {
+    reactFlowInstance.zoomIn({ duration: 180 });
+  }, [reactFlowInstance]);
+
+  const handleMiniMapZoomOut = useCallback(() => {
+    reactFlowInstance.zoomOut({ duration: 180 });
+  }, [reactFlowInstance]);
+
   // Initial fitView must run AFTER React Flow has actually mounted+measured the
   // deferred nodes — calling fitView from inside the layout debounce or rAF
   // races the deferred render and ends up zooming to nothing.
@@ -1663,6 +1820,18 @@ function KnowledgeGraphCanvasInner() {
           />
         )}
       </ReactFlow>
+
+      <AnimatePresence>
+        {!isEmpty && (
+          <GraphMiniMap
+            nodes={deferredNodes}
+            viewport={viewport}
+            onNodeClick={handleMiniMapNodeClick}
+            onZoomIn={handleMiniMapZoomIn}
+            onZoomOut={handleMiniMapZoomOut}
+          />
+        )}
+      </AnimatePresence>
 
       {/* Empty state blob */}
       {(isEmpty || isDissolving) && (
