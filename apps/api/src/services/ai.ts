@@ -110,12 +110,17 @@ export interface ExtractionResult {
 export async function extractTriplesFromChunk(
   chunkText: string,
   chunkIndex: number,
-  documentName?: string
+  documentName?: string,
+  rootTopic?: string,
 ): Promise<ExtractionResult> {
+  const rootAnchor = rootTopic
+    ? `\nROOT TOPIC ANCHOR — NON-NEGOTIABLE:\nThis document is analyzed in the context of "${rootTopic}". Prioritize relationships that involve or connect to "${rootTopic}". When an entity appears alongside "${rootTopic}", extract that relationship. Omit entities and relationships that have no plausible connection to "${rootTopic}".`
+    : '';
+
   try {
     const raw = await callOpenAI(
       [
-        { role: 'system', content: EXTRACTION_SYSTEM },
+        { role: 'system', content: EXTRACTION_SYSTEM + rootAnchor },
         { role: 'user', content: `Document: ${documentName || 'unknown'}\n\nText:\n${chunkText}` },
       ],
       { jsonMode: true, temperature: 0 }
@@ -182,6 +187,18 @@ export interface ExpandSubtreeResult {
   newTriples: RawExtractedTriple[];
   searchQueries: string[];
   searchResultCount: number;
+}
+
+// Per-run root topic registry — injected into extraction prompts to anchor the LLM
+// to the user's original subject and prevent topic drift across chunks / queries.
+const runRootContexts = new Map<string, string>();
+
+export function setRunRootContext(runId: string, topic: string): void {
+  runRootContexts.set(runId, topic.trim());
+}
+
+export function getRunRootContext(runId: string): string | undefined {
+  return runRootContexts.get(runId);
 }
 
 // Stable lowercase slug — used as temp IDs for items created in Pass 1 so Pass 2 can

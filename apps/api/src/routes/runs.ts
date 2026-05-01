@@ -5,6 +5,7 @@ import { getSupabase } from '../supabase';
 import { addClient, broadcast } from '../sse';
 import { persistTriple } from '../services/graph';
 import { chunkText, normalizeExtractedTriples } from '../services/ingestion';
+import { setRunRootContext } from '../services/ai';
 
 const router = Router();
 
@@ -99,11 +100,13 @@ router.post('/', async (req: Request, res: Response) => {
         return res.status(500).json({ error: 'Failed to create run' });
       }
 
+      setRunRootContext(data.id, prompt);
       broadcast({ event: 'run.status', data: { runId: data.id, status: 'running', prompt } });
       return res.json({ runId: data.id });
     }
 
     const runId = crypto.randomUUID();
+    setRunRootContext(runId, prompt);
     console.log(`[local] Created run ${runId} (Supabase not configured)`);
     broadcast({ event: 'run.status', data: { runId, status: 'running', prompt } });
     return res.json({ runId });

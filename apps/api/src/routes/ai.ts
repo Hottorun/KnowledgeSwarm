@@ -14,6 +14,7 @@ import {
   setRuntimeOpenAIKey,
   validateKeyFormat,
   verifyOpenAIKey,
+  getRunRootContext,
 } from '../services/ai';
 
 const router = Router();
@@ -86,10 +87,11 @@ router.post('/runs/:runId/extract', async (req: Request, res: Response) => {
 
     await emit(runId, 'ExtractionAgent', 'extracting', `Extracting graph triples from ${documentName}`);
     const chunks = chunkText(text, 500, 50);
+    const rootTopic = getRunRootContext(runId);
     let rawTriples: RawExtractedTriple[];
 
     if (isOpenAIConfigured()) {
-      const results = await Promise.all(chunks.map(chunk => extractTriplesFromChunk(chunk.text, chunk.index, documentName)));
+      const results = await Promise.all(chunks.map(chunk => extractTriplesFromChunk(chunk.text, chunk.index, documentName, rootTopic)));
       rawTriples = results.flatMap(result => result.triples);
       const errors = results.filter(result => result.error);
       if (errors.length > 0) {
