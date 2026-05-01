@@ -1,8 +1,11 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { config } from '../config';
 import type { BranchPlan, DocumentChunk, Triple, SupervisorOutput } from '../types';
-import { emitAgentEvent, emitTriples } from '../tools/emit';
+import { emitAgentEvent } from '../tools/emit';
 import { runWorker } from './worker';
+import type { SpecialistProfile } from './specialists';
+import { specialistDisplayName } from './specialists';
+import { parseJsonObject } from './json';
 
 const client = new Anthropic({ apiKey: config.anthropicApiKey });
 
@@ -20,38 +23,61 @@ Reject triples that:
 export async function runSupervisor(
   runId: string,
   branch: BranchPlan,
-  chunks: DocumentChunk[]
+  chunks: DocumentChunk[],
+  specialist: SpecialistProfile,
+  documentName: string
 ): Promise<Triple[]> {
-  const supervisorName = `Supervisor:${branch.label}`;
+  const specialistName = specialistDisplayName(specialist, branch);
+  const supervisorName = `Supervisor:${specialistName}`;
 
-  await emitAgentEvent(runId, supervisorName, 'started', `Branch: ${branch.label} — ${chunks.length} chunk(s)`);
+  await emitAgentEvent(runId, specialistName, 'specialist.selected', specialist.extractionHint, {
+    branchId: branch.id,
+    branchLabel: branch.label,
+    specialist: specialist.kind,
+    preferredPredicates: specialist.preferredPredicates,
+  });
+  await emitAgentEvent(runId, supervisorName, 'started', `Branch: ${branch.label} - ${chunks.length} chunk(s)`);
 
   const workerResults = await Promise.all(
     chunks.map(async chunk => {
-      const workerName = `Worker:${branch.id}`;
+      const workerName = `${specialistName}:Chunk${chunk.index}`;
       await emitAgentEvent(runId, workerName, 'extracting', `Chunk ${chunk.index} (${chunk.text.length} chars)`);
-      const output = await runWorker(chunk, branch.nodeTypes);
-      await emitAgentEvent(runId, workerName, 'done', `${output.triples.length} triple(s) from chunk ${chunk.index}`);
-      return output.triples;
+      try {
+        const output = await runWorker(chunk, branch.nodeTypes, specialist, branch, documentName);
+        await emitAgentEvent(runId, workerName, 'done', `${output.triples.length} triple(s) from chunk ${chunk.index}`);
+        return output.triples;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Worker failed';
+        console.error(`[${workerName}] ${message}`);
+        await emitAgentEvent(runId, workerName, 'failed', message.slice(0, 500));
+        return [];
+      }
     })
   );
 
   const allTriples = workerResults.flat();
   await emitAgentEvent(runId, supervisorName, 'reviewing', `Reviewing ${allTriples.length} raw triple(s)`);
 
-  const approved = await supervisorReview(branch, allTriples);
+  let approved: Triple[];
+  try {
+    approved = await supervisorReview(branch, specialist, allTriples);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Supervisor review failed';
+    console.error(`[${supervisorName}] ${message}`);
+    await emitAgentEvent(runId, supervisorName, 'warning', `Review failed; using ${allTriples.length} extracted triple(s)`);
+    approved = allTriples;
+  }
 
   await emitAgentEvent(runId, supervisorName, 'done', `Approved ${approved.length}/${allTriples.length}`);
-  await emitTriples(runId, supervisorName, approved);
 
   return approved;
 }
 
-async function supervisorReview(branch: BranchPlan, triples: Triple[]): Promise<Triple[]> {
+async function supervisorReview(branch: BranchPlan, specialist: SpecialistProfile, triples: Triple[]): Promise<Triple[]> {
   if (triples.length === 0) return [];
   if (triples.length <= 4) return triples;
   if (config.stubMode) {
-    console.log(`  [supervisor:${branch.id}] stub review — approving all ${triples.length}`);
+    console.log(`  [supervisor:${branch.id}] stub review - approving all ${triples.length}`);
     return triples;
   }
 
@@ -61,15 +87,19 @@ async function supervisorReview(branch: BranchPlan, triples: Triple[]): Promise<
     system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
     messages: [{
       role: 'user',
-      content: `Branch: "${branch.label}" — ${branch.focus}\n\n${JSON.stringify(triples)}`,
+      content: `Specialist: ${specialist.agentName}
+Specialist focus: ${specialist.extractionHint}
+Branch: "${branch.label}" - ${branch.focus}
+
+${JSON.stringify(triples)}`,
     }],
   });
 
   const text = response.content.find(b => b.type === 'text')?.text ?? '';
-  const output = JSON.parse(text) as SupervisorOutput;
+  const output = parseJsonObject<SupervisorOutput>(text);
 
   output.rejected.forEach(r =>
-    console.log(`  [supervisor:${branch.id}] rejected: ${r.triple.subject.id}->${r.triple.object.id} — ${r.reason}`)
+    console.log(`  [supervisor:${branch.id}] rejected: ${r.triple.subject.id}->${r.triple.object.id} - ${r.reason}`)
   );
 
   return output.approved;

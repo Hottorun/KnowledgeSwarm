@@ -1,7 +1,9 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { config } from '../config';
 import { STUB_TRIPLES } from '../stubs/fixtures';
-import type { DocumentChunk, WorkerOutput } from '../types';
+import type { BranchPlan, DocumentChunk, Triple, WorkerOutput } from '../types';
+import type { SpecialistProfile } from './specialists';
+import { parseJsonObject } from './json';
 
 const client = new Anthropic({ apiKey: config.anthropicApiKey });
 
@@ -13,20 +15,33 @@ Output ONLY valid JSON — no markdown, no explanation:
 Rules:
 - Node ID format: type:slug (e.g. company:acme-corp, person:jane-doe, obligation:monthly-payment)
 - Extract ONLY facts explicitly stated in the text — never hallucinate
+- Extract at least 3 concrete triples when the chunk contains explicit relationships
 - Confidence: 0.9+ explicit | 0.7–0.9 strong implication | 0.5–0.7 inference — discard below 0.5
 - Use the exact quoted text as the source snippet
 - Keep JSON compact`;
 
 export async function runWorker(
   chunk: DocumentChunk,
-  focusNodeTypes: string[]
+  focusNodeTypes: string[],
+  specialist: SpecialistProfile,
+  branch: BranchPlan,
+  documentName: string
 ): Promise<WorkerOutput> {
   if (config.stubMode) {
-    console.log(`  [worker] stub — chunk ${chunk.index}`);
-    return { triples: STUB_TRIPLES };
+    console.log(`  [${specialist.agentName}] stub - chunk ${chunk.index}`);
+    return { triples: withProvenance(STUB_TRIPLES, specialist, branch, chunk.index, documentName) };
   }
 
-  const userMessage = `Focus entity types: ${focusNodeTypes.join(', ')}\n\nDocument chunk ${chunk.index}:\n\n${chunk.text}`;
+  const userMessage = `Specialist: ${specialist.agentName}
+Extraction focus: ${specialist.extractionHint}
+Preferred predicates: ${specialist.preferredPredicates.join(', ')}
+Focus entity types: ${[...new Set([...focusNodeTypes, ...specialist.nodeTypes])].join(', ')}
+Branch: ${branch.label} - ${branch.focus}
+Source document: ${documentName}
+
+Document chunk ${chunk.index}:
+
+${chunk.text}`;
 
   const response = await client.messages.create({
     model: config.workerModel,
@@ -36,5 +51,54 @@ export async function runWorker(
   });
 
   const text = response.content.find(b => b.type === 'text')?.text ?? '';
-  return JSON.parse(text) as WorkerOutput;
+  const output = parseJsonObject<WorkerOutput>(text);
+  return {
+    triples: withProvenance(normalizeWorkerTriples(output.triples ?? []), specialist, branch, chunk.index, documentName),
+  };
+}
+
+function normalizeWorkerTriples(triples: Triple[]): Triple[] {
+  return triples
+    .filter(triple => triple?.subject?.label && triple?.predicate && triple?.object?.label)
+    .map(triple => ({
+      ...triple,
+      subject: {
+        id: triple.subject.id || makeId(triple.subject.type || 'Entity', triple.subject.label),
+        label: triple.subject.label,
+        type: triple.subject.type || 'Entity',
+        properties: triple.subject.properties || {},
+      },
+      object: {
+        id: triple.object.id || makeId(triple.object.type || 'Entity', triple.object.label),
+        label: triple.object.label,
+        type: triple.object.type || 'Entity',
+        properties: triple.object.properties || {},
+      },
+      confidence: typeof triple.confidence === 'number' ? triple.confidence : 0.75,
+      sources: triple.sources || [],
+      properties: triple.properties || {},
+    }));
+}
+
+function makeId(type: string, label: string): string {
+  return `${type.toLowerCase()}:${label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}`;
+}
+
+function withProvenance(
+  triples: Triple[],
+  specialist: SpecialistProfile,
+  branch: BranchPlan,
+  chunkIndex: number,
+  documentName: string
+): Triple[] {
+  return triples.map(triple => ({
+    ...triple,
+    properties: {
+      ...(triple.properties ?? {}),
+      specialist: specialist.kind,
+      branchId: branch.id,
+      chunkIndex,
+      documentName,
+    },
+  }));
 }

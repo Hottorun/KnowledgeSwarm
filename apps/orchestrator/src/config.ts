@@ -4,7 +4,7 @@ import path from 'path';
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
 export const config = {
-  anthropicApiKey: process.env.ANTHROPIC_API_KEY || '',
+  anthropicApiKey: process.env.ANTHROPIC_API_KEY || (process.env.STUB_MODE === 'true' ? 'sk-ant-stub-00000' : ''),
   apiBaseUrl: process.env.API_BASE_URL || 'http://localhost:8787',
   stubMode: process.env.STUB_MODE === 'true',
   metaModel: 'claude-sonnet-4-6' as const,

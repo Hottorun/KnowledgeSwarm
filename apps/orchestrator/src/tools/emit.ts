@@ -18,7 +18,8 @@ export async function emitAgentEvent(
     body: JSON.stringify({ agentName, eventType, message, payload }),
   });
   if (!res.ok) {
-    console.error(`[emit] agent-events failed: ${res.status}`);
+    const body = await res.text().catch(() => '');
+    throw new Error(`[emit] agent-events failed: ${res.status} ${body}`);
   }
 }
 
@@ -41,6 +42,7 @@ export async function emitTriples(
     body: JSON.stringify({ agentName, triples }),
   });
   if (!res.ok) {
-    console.error(`[emit] triples failed: ${res.status}`);
+    const body = await res.text().catch(() => '');
+    throw new Error(`[emit] triples failed: ${res.status} ${body}`);
   }
 }

@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "orchestrate": "tsx src/index.ts",
     "start": "node dist/index.js",
     "build": "tsc",
     "stub": "STUB_MODE=true tsx src/index.ts",

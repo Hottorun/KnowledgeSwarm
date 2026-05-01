@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { persistTriple } from '../services/graph';
 import { chunkText, normalizeExtractedTriples, RawExtractedTriple } from '../services/ingestion';
+import { runSwarmExtraction } from '../services/swarm';
 import { broadcast } from '../sse';
 import {
   expandSubtree,
@@ -108,6 +109,31 @@ router.post('/runs/:runId/extract', async (req: Request, res: Response) => {
     return res.json({ ok: true, extracted: rawTriples.length, persisted: triples.length });
   } catch (err) {
     return handleRouteError(res, err, 'Extraction failed');
+  }
+});
+
+router.post('/runs/:runId/swarm-extract', async (req: Request, res: Response) => {
+  try {
+    const runId = String(req.params.runId);
+    const { text, documentName } = extractSchema.parse(req.body);
+
+    await emit(runId, 'SwarmOrchestrator', 'started', `Starting specialist swarm for ${documentName}`);
+    const result = await runSwarmExtraction(runId, text, documentName);
+
+    if (!result.ok) {
+      console.error('[swarm] failed:', result.stderr || result.stdout);
+      await emit(runId, 'SwarmOrchestrator', 'failed', `Specialist swarm failed with code ${result.code ?? 'unknown'}`);
+      return res.status(502).json({
+        error: 'Specialist swarm failed',
+        code: result.code,
+        details: (result.stderr || result.stdout).slice(-2000),
+      });
+    }
+
+    await emit(runId, 'SwarmOrchestrator', 'completed', `Specialist swarm completed for ${documentName}`);
+    return res.json({ ok: true, mode: 'swarm', stdout: result.stdout.slice(-2000) });
+  } catch (err) {
+    return handleRouteError(res, err, 'Swarm extraction failed');
   }
 });
 

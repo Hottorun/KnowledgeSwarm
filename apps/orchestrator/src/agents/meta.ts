@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { config } from '../config';
 import { STUB_DECOMPOSITION } from '../stubs/fixtures';
 import type { DecompositionResult } from '../types';
+import { parseJsonObject } from './json';
 
 const client = new Anthropic({ apiKey: config.anthropicApiKey });
 
@@ -41,5 +42,5 @@ export async function decomposeDocument(documentSummary: string): Promise<Decomp
   });
 
   const text = response.content.find(b => b.type === 'text')?.text ?? '';
-  return JSON.parse(text) as DecompositionResult;
+  return parseJsonObject<DecompositionResult>(text);
 }

@@ -1,4 +1,5 @@
 import dotenv from 'dotenv';
+import path from 'path';
 dotenv.config();
 
 function parseCorsOrigins(raw: string | undefined): string[] {
@@ -24,6 +25,8 @@ export const config = {
   searchMaxResults: parseInt(process.env.SEARCH_MAX_RESULTS || '5', 10),
   mcpServerUrl: process.env.MCP_SERVER_URL || '',
   openaiApiKey: process.env.OPENAI_API_KEY || '',
+  swarmOrchestratorCwd: process.env.SWARM_ORCHESTRATOR_CWD || path.resolve(__dirname, '../../orchestrator'),
+  swarmTimeoutMs: parseInt(process.env.SWARM_TIMEOUT_MS || '120000', 10),
 };
 
 export function isSupabaseConfigured(): boolean {
