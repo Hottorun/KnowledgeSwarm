@@ -41,11 +41,34 @@ export function openRunStream(runId: string): EventSource {
   return new EventSource(`${API_BASE}/runs/${runId}/events`);
 }
 
+export async function swarmExtractFromText(
+  runId: string,
+  text: string,
+  documentName = 'input',
+): Promise<void> {
+  const res = await fetch(`${API_BASE}/ai/runs/${runId}/swarm-extract`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, documentName }),
+  });
+  if (!res.ok) {
+    const data = await res.json() as { error?: string };
+    throw new Error(data.error ?? 'Swarm extraction failed');
+  }
+}
+
 export async function extractFromText(
   runId: string,
   text: string,
   documentName = 'input',
 ): Promise<void> {
+  try {
+    await swarmExtractFromText(runId, text, documentName);
+    return;
+  } catch (error) {
+    console.warn('Swarm extraction failed; falling back to generic extraction', error);
+  }
+
   const res = await fetch(`${API_BASE}/ai/runs/${runId}/extract`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
