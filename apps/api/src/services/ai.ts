@@ -363,6 +363,7 @@ STRICT RULES:
 - Omit vague or generic items ("some facts", "various companies")
 - Type must be one of: Company, Person, Product, Market, Technology, Location, Concept, Entity
 - Do NOT duplicate labels from the EXISTING list
+- HARD LIMIT: return at most 8 items total. Rank by semantic relevance to the target and question; drop everything beyond position 8. Quality over quantity.
 
 SPO SCHEMA — NON-NEGOTIABLE:
 Items are OBJECTS (values, entities). Attribute names are PREDICATES (edges) — they MUST NOT appear as node labels.
@@ -409,6 +410,7 @@ ${allWebContext.slice(0, 24).join('\n\n')}`;
 
   const extractedItems: ExtractedItem[] = (pass1Parsed.items || [])
     .filter(i => i.label && i.type)
+    .slice(0, 8)
     .map(i => {
       const exactValue = typeof i.exact_value === 'number' ? i.exact_value : null;
       const unit = typeof i.unit === 'string' && i.unit ? i.unit : null;
