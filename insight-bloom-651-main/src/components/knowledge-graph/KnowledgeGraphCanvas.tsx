@@ -205,6 +205,22 @@ interface SseEnvelope<T> {
   payload: T;
 }
 
+// ── Depth helper ──────────────────────────────────────────────────────────────
+
+function computeNodeDepth(nodeId: string, edgeList: Edge[]): number {
+  let depth = 0;
+  let cursor = nodeId;
+  const visited = new Set<string>();
+  while (depth < 20) {
+    visited.add(cursor);
+    const parentEdge = edgeList.find(e => e.target === cursor && !visited.has(e.source));
+    if (!parentEdge) break;
+    cursor = parentEdge.source;
+    depth++;
+  }
+  return depth;
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 function KnowledgeGraphCanvasInner() {
@@ -238,6 +254,8 @@ function KnowledgeGraphCanvasInner() {
   const placeholderNodesRef = useRef<Set<string>>(new Set());
   const expansionAnchorRef = useRef<{ id: string; pos: { x: number; y: number } } | null>(null);
   const expansionChildIdxRef = useRef<number>(0);
+  const nodesRef = useRef<Node[]>([]);
+  const expansionDepthRef = useRef<number>(0);
 
   useOnViewportChange({
     onChange: useCallback((vp: { x: number; y: number; zoom: number }) => {
@@ -323,8 +341,29 @@ function KnowledgeGraphCanvasInner() {
     source.addEventListener('node.created', (e: MessageEvent) => {
       const envelope = JSON.parse(e.data) as SseEnvelope<{ node: BackendNode }>;
       const backendNode = envelope.payload.node;
-
       const anchor = expansionAnchorRef.current;
+
+      // Case-insensitive label dedup against current graph
+      const normalLabel = backendNode.label.toLowerCase().trim();
+      const existingByLabel = nodesRef.current.find(
+        n => n.id !== backendNode.id && ((n.data as GraphNodeData).label ?? '').toLowerCase().trim() === normalLabel
+      );
+      if (existingByLabel) {
+        // Node already exists — draw a connecting edge instead of adding a duplicate
+        if (anchor) {
+          const reuseId = `e-reuse-${anchor.id}-${existingByLabel.id}`;
+          setEdges(prev => prev.some(ex => ex.id === reuseId) ? prev : [...prev, {
+            id: reuseId,
+            source: anchor.id,
+            target: existingByLabel.id,
+            label: 'also connects',
+            type: 'floating',
+          }]);
+        }
+        return;
+      }
+
+      // Position new node relative to anchor (or spiral fallback)
       let pos: { x: number; y: number };
       if (anchor) {
         const idx = expansionChildIdxRef.current++;
@@ -340,14 +379,24 @@ function KnowledgeGraphCanvasInner() {
       nodePositionRef.current.set(backendNode.id, pos);
       placeholderNodesRef.current.add(backendNode.id);
 
+      // Depth-based nodeType: root=0 → topic, topic=1 → subtopic, subtopic/detail=2+ → detail
+      const parentDepth = expansionDepthRef.current;
+      const nodeType: GraphNodeData['nodeType'] =
+        parentDepth === 0 ? 'topic' :
+        parentDepth === 1 ? 'subtopic' : 'detail';
+
       setNodes(prev => {
         if (prev.some(n => n.id === backendNode.id)) return prev;
-        const nodeType = prev.length === 0 ? 'root' : prev.length < 8 ? 'topic' : 'subtopic';
         return [...prev, {
           id: backendNode.id,
           type: 'graphNode',
           position: pos,
-          data: { label: backendNode.label, nodeType, description: backendNode.type },
+          data: {
+            label: backendNode.label,
+            nodeType,
+            description: backendNode.type,
+            parentId: anchor?.id,
+          },
         } as GraphLayoutNode];
       });
 
@@ -405,6 +454,8 @@ function KnowledgeGraphCanvasInner() {
   useEffect(() => {
     return () => { eventSourceRef.current?.close(); };
   }, []);
+
+  useEffect(() => { nodesRef.current = nodes; }, [nodes]);
 
   const handleDataSubmit = useCallback(async (text: string, documentName = 'input.txt') => {
     setIsDissolving(true);
@@ -556,6 +607,7 @@ function KnowledgeGraphCanvasInner() {
     // Set expansion anchor — start child index after existing children so new nodes don't overlap
     expansionAnchorRef.current = { id: selectedNode.id, pos: { ...selectedNode.position } };
     expansionChildIdxRef.current = edges.filter(e => e.source === selectedNode.id).length;
+    expansionDepthRef.current = computeNodeDepth(selectedNode.id, edges);
 
     // ── Collect subtree going DOWN (children of selected node) ──────────────
     const subtreeIds = new Set<string>([selectedNode.id]);

@@ -207,7 +207,10 @@ Output JSON: { "queries": [string, string, ...] }`;
 
 ROOT NODE: ${rootNode.label} (${rootNode.type})
 
-EXISTING BRANCH:
+EXISTING NODES (strict deduplication — do NOT create new nodes for these):
+${[rootNode.label, ...nodes.map(n => n.label)].join('\n')}
+
+EXISTING RELATIONSHIPS IN THIS BRANCH:
 ${edgeList || 'No relationships yet.'}
 
 ${question ? `USER QUESTION: ${question}` : `GOAL: Find new entities and relationships connected to "${rootNode.label}" and its branch.`}
@@ -215,8 +218,10 @@ ${question ? `USER QUESTION: ${question}` : `GOAL: Find new entities and relatio
 WEB SEARCH RESULTS:
 ${allWebContext.join('\n\n')}
 
-Extract all meaningful new Subject-Predicate-Object relationships from the search results.
-- Prefer relationships that connect to the existing branch nodes when possible.
+Extract meaningful new Subject-Predicate-Object relationships.
+Rules:
+- DEDUPLICATION: If subject or object semantically matches any name in the EXISTING NODES list above (case-insensitive), use the EXACT label string from that list. Never create a variant like "Apple Inc" if "Apple" already exists — reuse the exact existing label.
+- Prefer relationships connecting to existing branch nodes.
 - Include relationships between newly found entities too.
 - Predicate must be short (1–4 words).
 - subjectType/objectType: Company, Person, Market, Product, Location, Concept, Event, or Entity.
