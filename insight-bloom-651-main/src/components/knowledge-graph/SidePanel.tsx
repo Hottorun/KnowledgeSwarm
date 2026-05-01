@@ -4,7 +4,88 @@ import type { AIReasoningStep } from './types';
 import type { Node, Edge } from '@xyflow/react';
 import type { GraphNodeData } from './GraphNode';
 
-function TocTree({ sections, onNodeFocus }: { sections: any[]; onNodeFocus?: (id: string) => void }) {
+interface TocNode {
+  id: string;
+  label: string;
+  children: TocNode[];
+}
+
+function TocItem({
+  node,
+  depth,
+  expanded,
+  onToggle,
+  onNodeFocus,
+}: {
+  node: TocNode;
+  depth: number;
+  expanded: Set<string>;
+  onToggle: (id: string) => void;
+  onNodeFocus?: (id: string) => void;
+}) {
+  const hasChildren = node.children.length > 0;
+  const isExpanded = expanded.has(node.id);
+
+  const fontSizeClass = depth === 0 ? 'text-sm font-semibold' : depth === 1 ? 'text-xs font-medium' : 'text-xs';
+  const colorStyle = depth === 0 ? 'var(--foreground)' : 'var(--muted-foreground)';
+  const opacity = depth >= 2 ? 0.8 : 1;
+
+  return (
+    <div>
+      <div className="flex items-center" style={{ paddingLeft: `${depth * 12}px` }}>
+        {hasChildren ? (
+          <button
+            onClick={() => onToggle(node.id)}
+            className="w-5 h-5 flex items-center justify-center shrink-0 rounded transition-colors hover:bg-accent"
+            style={{ color: 'var(--muted-foreground)' }}
+          >
+            <svg
+              width="9" height="9" viewBox="0 0 10 10" fill="none"
+              style={{ transform: isExpanded ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.15s' }}
+            >
+              <path d="M3 1.5L7 5L3 8.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+        ) : (
+          <span className="w-5 h-5 flex items-center justify-center shrink-0">
+            <span className="w-1 h-1 rounded-full" style={{ background: 'var(--muted-foreground)', opacity: 0.4 }} />
+          </span>
+        )}
+        <button
+          onClick={() => onNodeFocus?.(node.id)}
+          className={`flex-1 text-left rounded-lg px-2 py-1 ${fontSizeClass} transition-colors hover:bg-accent`}
+          style={{ color: colorStyle, opacity }}
+        >
+          {node.label}
+        </button>
+      </div>
+      <AnimatePresence>
+        {isExpanded && hasChildren && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.15 }}
+            className="overflow-hidden"
+          >
+            {node.children.map(child => (
+              <TocItem
+                key={child.id}
+                node={child}
+                depth={depth + 1}
+                expanded={expanded}
+                onToggle={onToggle}
+                onNodeFocus={onNodeFocus}
+              />
+            ))}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+function TocTree({ roots, onNodeFocus }: { roots: TocNode[]; onNodeFocus?: (id: string) => void }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   const toggle = (id: string) => {
@@ -18,92 +99,15 @@ function TocTree({ sections, onNodeFocus }: { sections: any[]; onNodeFocus?: (id
 
   return (
     <div className="space-y-0.5">
-      {sections.map((section) => (
-        <div key={section.id}>
-          <div className="flex items-center">
-            <button
-              onClick={() => toggle(section.id)}
-              className="w-5 h-5 flex items-center justify-center shrink-0 rounded transition-colors hover:bg-accent"
-              style={{ color: 'var(--muted-foreground)' }}
-            >
-              <svg
-                width="10" height="10" viewBox="0 0 10 10" fill="none"
-                style={{ transform: expanded.has(section.id) ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.15s' }}
-              >
-                <path d="M3 1.5L7 5L3 8.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
-            <button
-              onClick={() => onNodeFocus?.(section.id)}
-              className="flex-1 text-left rounded-lg px-2 py-1.5 text-sm font-semibold transition-colors hover:bg-accent"
-              style={{ color: 'var(--foreground)' }}
-            >
-              {section.label}
-            </button>
-          </div>
-          <AnimatePresence>
-            {expanded.has(section.id) && section.children?.length > 0 && (
-              <motion.div
-                initial={{ height: 0, opacity: 0 }}
-                animate={{ height: 'auto', opacity: 1 }}
-                exit={{ height: 0, opacity: 0 }}
-                transition={{ duration: 0.15 }}
-                className="overflow-hidden"
-              >
-                {section.children.map((child: any) => (
-                  <div key={child.id} className="pl-4">
-                    <div className="flex items-center">
-                      {child.subs?.length > 0 && (
-                        <button
-                          onClick={() => toggle(child.id)}
-                          className="w-5 h-5 flex items-center justify-center shrink-0 rounded transition-colors hover:bg-accent"
-                          style={{ color: 'var(--muted-foreground)' }}
-                        >
-                          <svg
-                            width="8" height="8" viewBox="0 0 10 10" fill="none"
-                            style={{ transform: expanded.has(child.id) ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.15s' }}
-                          >
-                            <path d="M3 1.5L7 5L3 8.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                          </svg>
-                        </button>
-                      )}
-                      {!child.subs?.length && <span className="w-5" />}
-                      <button
-                        onClick={() => onNodeFocus?.(child.id)}
-                        className="flex-1 text-left rounded-lg px-2 py-1 text-xs font-medium transition-colors hover:bg-accent"
-                        style={{ color: 'var(--muted-foreground)' }}
-                      >
-                        {child.label}
-                      </button>
-                    </div>
-                    <AnimatePresence>
-                      {expanded.has(child.id) && child.subs?.length > 0 && (
-                        <motion.div
-                          initial={{ height: 0, opacity: 0 }}
-                          animate={{ height: 'auto', opacity: 1 }}
-                          exit={{ height: 0, opacity: 0 }}
-                          transition={{ duration: 0.15 }}
-                          className="overflow-hidden pl-5"
-                        >
-                          {child.subs.map((sub: any) => (
-                            <button
-                              key={sub.id}
-                              onClick={() => onNodeFocus?.(sub.id)}
-                              className="w-full text-left rounded-lg px-2 py-1 text-xs transition-colors hover:bg-accent"
-                              style={{ color: 'var(--muted-foreground)', opacity: 0.75 }}
-                            >
-                              {sub.label}
-                            </button>
-                          ))}
-                        </motion.div>
-                      )}
-                    </AnimatePresence>
-                  </div>
-                ))}
-              </motion.div>
-            )}
-          </AnimatePresence>
-        </div>
+      {roots.map(root => (
+        <TocItem
+          key={root.id}
+          node={root}
+          depth={0}
+          expanded={expanded}
+          onToggle={toggle}
+          onNodeFocus={onNodeFocus}
+        />
       ))}
     </div>
   );
@@ -122,78 +126,41 @@ interface SidePanelProps {
 export function SidePanel({ side, isOpen, onClose, nodes = [], edges = [], onNodeFocus, reasoningSteps = [] }: SidePanelProps) {
   const isLeft = side === 'left';
 
-  // Build table of contents: group nodes by type (root > topics > subtopics)
-  const tocSections = (() => {
+  // Build TOC tree by traversing edges from root nodes
+  const tocRoots = (() => {
     if (!isLeft || nodes.length === 0) return [];
-    const rootNodes = nodes.filter(n => (n.data as GraphNodeData).nodeType === 'root');
-    const topicNodes = nodes.filter(n => (n.data as GraphNodeData).nodeType === 'topic');
-    const subtopicNodes = nodes.filter(n => (n.data as GraphNodeData).nodeType === 'subtopic');
 
-    // Build a map of parent -> children from edges
+    const nodeMap = new Map(nodes.map(n => [n.id, n]));
+
+    // Build parent->children adjacency from edges
     const childrenMap = new Map<string, string[]>();
+    const hasParent = new Set<string>();
     edges.forEach(e => {
-      const list = childrenMap.get(e.source) || [];
+      if (!nodeMap.has(e.source) || !nodeMap.has(e.target)) return;
+      const list = childrenMap.get(e.source) ?? [];
       list.push(e.target);
       childrenMap.set(e.source, list);
+      hasParent.add(e.target);
     });
 
-    const sections: { id: string; label: string; type: string; children: { id: string; label: string }[] }[] = [];
+    // Recursively build TocNode tree, guarding against cycles
+    const buildTree = (id: string, visited: Set<string>): TocNode => {
+      const node = nodeMap.get(id)!;
+      const childIds = childrenMap.get(id) ?? [];
+      const children = childIds
+        .filter(cid => !visited.has(cid))
+        .map(cid => buildTree(cid, new Set([...visited, id])));
+      return { id, label: (node.data as GraphNodeData).label, children };
+    };
 
-    // Add root nodes
-    rootNodes.forEach(root => {
-      const rootChildren = (childrenMap.get(root.id) || [])
-        .map(cid => topicNodes.find(n => n.id === cid))
-        .filter(Boolean) as Node[];
+    // Start from nodes that have no parent (true roots in the graph)
+    const roots = nodes.filter(n => !hasParent.has(n.id));
+    // Fallback: if everything has a parent (cycle), use nodeType=root nodes
+    const startNodes = roots.length > 0
+      ? roots
+      : nodes.filter(n => (n.data as GraphNodeData).nodeType === 'root');
 
-      sections.push({
-        id: root.id,
-        label: (root.data as GraphNodeData).label,
-        type: 'root',
-        children: rootChildren.map(topic => ({
-          id: topic.id,
-          label: (topic.data as GraphNodeData).label,
-        })),
-      });
-    });
-
-    // Add topics that aren't already children of root
-    const rootChildIds = new Set(sections.flatMap(s => s.children.map(c => c.id)));
-    topicNodes.filter(t => !rootChildIds.has(t.id)).forEach(topic => {
-      const topicChildren = (childrenMap.get(topic.id) || [])
-        .map(cid => subtopicNodes.find(n => n.id === cid))
-        .filter(Boolean) as Node[];
-      sections.push({
-        id: topic.id,
-        label: (topic.data as GraphNodeData).label,
-        type: 'topic',
-        children: topicChildren.map(sub => ({
-          id: sub.id,
-          label: (sub.data as GraphNodeData).label,
-        })),
-      });
-    });
-
-    // For topics that are children of root, also add their subtopics inline
-    // Rebuild sections to nest subtopics under topics
-    const enriched = sections.map(section => {
-      if (section.type === 'root') {
-        return {
-          ...section,
-          children: section.children.map(topic => {
-            const subs = (childrenMap.get(topic.id) || [])
-              .map(cid => subtopicNodes.find(n => n.id === cid))
-              .filter(Boolean) as Node[];
-            return {
-              ...topic,
-              subs: subs.map(s => ({ id: s.id, label: (s.data as GraphNodeData).label })),
-            };
-          }),
-        };
-      }
-      return section;
-    });
-
-    return enriched;
+    return startNodes.map(n => buildTree(n.id, new Set([n.id])));
   })();
 
   return (
@@ -232,12 +199,12 @@ export function SidePanel({ side, isOpen, onClose, nodes = [], edges = [], onNod
           {/* Content */}
           <div className="p-5 overflow-y-auto" style={{ height: 'calc(100% - 57px)' }}>
             {isLeft ? (
-              tocSections.length === 0 ? (
+              tocRoots.length === 0 ? (
                 <p className="text-xs" style={{ color: 'var(--muted-foreground)' }}>
                   Build a mind map to see its table of contents here.
                 </p>
               ) : (
-                <TocTree sections={tocSections} onNodeFocus={onNodeFocus} />
+                <TocTree roots={tocRoots} onNodeFocus={onNodeFocus} />
               )
             ) : (
               reasoningSteps.length === 0 ? (

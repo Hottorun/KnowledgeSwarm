@@ -1037,8 +1037,8 @@ function KnowledgeGraphCanvasInner() {
         onToggleConnection={() => setConnectionMode(c => !c)}
       />
 
-      <EdgeButton side="left" label="Contents" icon="📑" onClick={() => setLeftPanel(p => !p)} isActive={leftPanel} />
-      <EdgeButton side="right" label="Reasoning" icon="🧠" onClick={() => setRightPanel(p => !p)} isActive={rightPanel} />
+      {!isEmpty && <EdgeButton side="left" label="Contents" icon="📑" onClick={() => setLeftPanel(p => !p)} isActive={leftPanel} />}
+      {!isEmpty && <EdgeButton side="right" label="Reasoning" icon="🧠" onClick={() => setRightPanel(p => !p)} isActive={rightPanel} />}
 
       <ReactFlow
         nodes={nodesWithHighlight}
