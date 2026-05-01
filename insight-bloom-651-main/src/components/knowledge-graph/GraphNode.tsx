@@ -10,6 +10,11 @@ export interface GraphNodeData {
   compact?: boolean;
   animDelay?: number;
   isExpanding?: boolean;
+  // Number of this node's neighbors that are currently NOT rendered on the
+  // canvas (they're "behind" the cluster boundary). Rendered as a small
+  // badge in the top-right of the node so the user knows how much more
+  // graph hangs off this point without seeing it.
+  hiddenCount?: number;
   [key: string]: unknown;
 }
 
@@ -331,6 +336,35 @@ function GraphNodeComponent({ data, selected }: NodeProps) {
       <Handle type="source" position={Position.Bottom} className="!bg-transparent !w-1 !h-1 !border-none !bottom-0 !left-1/2 !-translate-x-1/2" />
       <Handle type="source" position={Position.Left}  id="left-s"  className="!bg-transparent !w-1 !h-1 !border-none !left-0 !top-1/2 !-translate-y-1/2" />
       <Handle type="source" position={Position.Right} id="right-s" className="!bg-transparent !w-1 !h-1 !border-none !right-0 !top-1/2 !-translate-y-1/2" />
+
+      {/* ── Hidden-neighbor count badge ─────────────────────── */}
+      {nodeData.hiddenCount !== undefined && nodeData.hiddenCount > 0 && (
+        <div
+          style={{
+            position: 'absolute',
+            top: -8,
+            right: -8,
+            minWidth: 22,
+            height: 22,
+            padding: '0 7px',
+            borderRadius: 11,
+            background: dot,
+            color: 'white',
+            fontSize: 11,
+            fontWeight: 700,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            boxShadow: '0 2px 8px rgba(0,0,0,0.25), 0 0 0 2px var(--kg-canvas)',
+            zIndex: 5,
+            fontFamily: 'var(--font-display)',
+            pointerEvents: 'none',
+            lineHeight: 1,
+          }}
+        >
+          +{nodeData.hiddenCount}
+        </div>
+      )}
     </div>
   );
 }
