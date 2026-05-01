@@ -25,7 +25,7 @@ import { EdgeButton } from './EdgeButton';
 import { FloatingEdge } from './FloatingEdge';
 import type { AIReasoningStep, DataSource } from './types';
 import type { NodeRelationship } from './NodeInputBox';
-import { createRun, extractFromText, openRunStream, expandSubtree as apiExpandSubtree, type ExpandContext } from '@/lib/api';
+import { createRun, extractFromText, extractFromFile, openRunStream, expandSubtree as apiExpandSubtree, type ExpandContext } from '@/lib/api';
 
 type GraphLayoutNode = Node<GraphNodeData>;
 
@@ -1219,6 +1219,13 @@ function KnowledgeGraphCanvasInner() {
     }, 50);
   }, [nodes, reactFlowInstance]);
 
+  const handleUploadDocuments = useCallback(async (files: File[]) => {
+    if (!runId) return;
+    for (const file of files) {
+      await extractFromFile(runId, file);
+    }
+  }, [runId]);
+
   const handlePaneClick = useCallback(() => {
     setSelectedNode(null);
     setInputBoxPos(null);
@@ -1255,6 +1262,7 @@ function KnowledgeGraphCanvasInner() {
         onToggleFocus={() => setFocusMode(f => !f)}
         onToggleConnection={() => setConnectionMode(c => !c)}
         onSearchOpen={() => setSearchOpen(true)}
+        onUploadDocuments={handleUploadDocuments}
         graphLoaded={!isEmpty}
       />
 

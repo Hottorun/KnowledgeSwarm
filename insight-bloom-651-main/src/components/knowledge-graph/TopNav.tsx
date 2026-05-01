@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { UploadModal } from './UploadModal';
 
 interface TopNavProps {
   focusMode: boolean;
@@ -7,11 +8,13 @@ interface TopNavProps {
   onToggleFocus: () => void;
   onToggleConnection: () => void;
   onSearchOpen: () => void;
+  onUploadDocuments: (files: File[]) => void;
   graphLoaded: boolean;
 }
 
-export function TopNav({ onSearchOpen, graphLoaded }: TopNavProps) {
+export function TopNav({ onSearchOpen, onUploadDocuments, graphLoaded }: TopNavProps) {
   const [showProfile, setShowProfile] = useState(false);
+  const [uploadOpen, setUploadOpen] = useState(false);
 
   return (
     <div className="fixed top-0 left-0 right-0 z-30 flex items-center justify-between px-5 py-3">
@@ -38,7 +41,7 @@ export function TopNav({ onSearchOpen, graphLoaded }: TopNavProps) {
         </span>
       </div>
 
-      {/* Search + Profile */}
+      {/* Search + Upload + Profile */}
       <div className="flex items-center gap-2">
       {/* Search button — only when graph is loaded */}
       <AnimatePresence>
@@ -60,6 +63,34 @@ export function TopNav({ onSearchOpen, graphLoaded }: TopNavProps) {
           </motion.button>
         )}
       </AnimatePresence>
+
+      {/* Upload documents button — only when graph is loaded */}
+      <AnimatePresence>
+        {graphLoaded && (
+          <motion.button
+            initial={{ opacity: 0, scale: 0.85 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.85 }}
+            transition={{ duration: 0.18 }}
+            onClick={() => setUploadOpen(true)}
+            className="w-8 h-8 rounded-xl flex items-center justify-center transition-colors hover:bg-accent"
+            style={{ background: 'var(--secondary)', border: '1px solid var(--border)' }}
+            title="Upload documents"
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" style={{ color: 'var(--muted-foreground)' }}>
+              <path d="M8 11V3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+              <path d="M5 6L8 3L11 6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+              <path d="M3 13H13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+            </svg>
+          </motion.button>
+        )}
+      </AnimatePresence>
+
+      <UploadModal
+        isOpen={uploadOpen}
+        onClose={() => setUploadOpen(false)}
+        onUpload={onUploadDocuments}
+      />
 
       {/* Profile */}
       <div className="relative">
