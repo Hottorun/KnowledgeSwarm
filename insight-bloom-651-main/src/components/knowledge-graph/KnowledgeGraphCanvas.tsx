@@ -112,6 +112,76 @@ function forceDirectedLayout(layoutNodes: GraphLayoutNode[], layoutEdges: Edge[]
   return layoutNodes.map(n => ({ ...n, position: pos.get(n.id) ?? n.position }));
 }
 
+// Expanded node dimensions (the larger state — worst case for overlap checks)
+const NODE_DIMS: Record<string, { w: number; h: number }> = {
+  root:     { w: 180, h: 64 },
+  topic:    { w: 150, h: 52 },
+  subtopic: { w: 130, h: 46 },
+  detail:   { w: 110, h: 40 },
+};
+const NODE_GAP = 14; // minimum pixel gap between any two node edges
+
+function resolveOverlaps(layoutNodes: GraphLayoutNode[]): GraphLayoutNode[] {
+  if (layoutNodes.length < 2) return layoutNodes;
+
+  const pos = new Map(layoutNodes.map(n => [n.id, { x: n.position.x, y: n.position.y }]));
+  const pinned = new Set(
+    layoutNodes.filter(n => (n.data as GraphNodeData).nodeType === 'root').map(n => n.id)
+  );
+
+  // Iteratively separate overlapping pairs until none remain
+  for (let iter = 0; iter < 1000; iter++) {
+    let anyOverlap = false;
+
+    for (let i = 0; i < layoutNodes.length; i++) {
+      for (let j = i + 1; j < layoutNodes.length; j++) {
+        const a = layoutNodes[i];
+        const b = layoutNodes[j];
+        const pa = pos.get(a.id)!;
+        const pb = pos.get(b.id)!;
+        const da = NODE_DIMS[(a.data as GraphNodeData).nodeType] ?? NODE_DIMS.detail;
+        const db = NODE_DIMS[(b.data as GraphNodeData).nodeType] ?? NODE_DIMS.detail;
+
+        // AABB overlap with gap padding
+        const overlapX = Math.min(pa.x + da.w + NODE_GAP, pb.x + db.w + NODE_GAP) - Math.max(pa.x - NODE_GAP, pb.x - NODE_GAP);
+        const overlapY = Math.min(pa.y + da.h + NODE_GAP, pb.y + db.h + NODE_GAP) - Math.max(pa.y - NODE_GAP, pb.y - NODE_GAP);
+
+        if (overlapX <= 0 || overlapY <= 0) continue;
+
+        anyOverlap = true;
+
+        const aPinned = pinned.has(a.id);
+        const bPinned = pinned.has(b.id);
+        const aCenterX = pa.x + da.w / 2, aCenterY = pa.y + da.h / 2;
+        const bCenterX = pb.x + db.w / 2, bCenterY = pb.y + db.h / 2;
+
+        // Separate along the axis with smaller penetration (minimum separation vector)
+        if (overlapX <= overlapY) {
+          const dir = bCenterX >= aCenterX ? 1 : -1;
+          const half = overlapX / 2;
+          if (!aPinned && !bPinned) { pa.x -= dir * half; pb.x += dir * half; }
+          else if (aPinned) { pb.x += dir * overlapX; }
+          else              { pa.x -= dir * overlapX; }
+        } else {
+          const dir = bCenterY >= aCenterY ? 1 : -1;
+          const half = overlapY / 2;
+          if (!aPinned && !bPinned) { pa.y -= dir * half; pb.y += dir * half; }
+          else if (aPinned) { pb.y += dir * overlapY; }
+          else              { pa.y -= dir * overlapY; }
+        }
+      }
+    }
+
+    if (!anyOverlap) break;
+  }
+
+  return layoutNodes.map(n => ({ ...n, position: pos.get(n.id) ?? n.position }));
+}
+
+function layout(nodes: GraphLayoutNode[], edges: Edge[]): GraphLayoutNode[] {
+  return resolveOverlaps(forceDirectedLayout(nodes, edges));
+}
+
 // Deterministic pseudo-random based on index
 function seededRandom(seed: number): number {
   const x = Math.sin(seed * 127.1 + 311.7) * 43758.5453;
@@ -243,7 +313,7 @@ function generateGraphFromText(text: string): { nodes: Node[]; edges: Edge[]; re
     type: 'analysis',
   });
 
-  return { nodes: forceDirectedLayout(nodes, edges), edges, reasoning };
+  return { nodes: layout(nodes, edges), edges, reasoning };
 }
 
 function KnowledgeGraphCanvasInner() {
@@ -265,6 +335,8 @@ function KnowledgeGraphCanvasInner() {
   const edgeTypes = useMemo(() => ({ floating: FloatingEdge }), []);
   const [highlightedNodes, setHighlightedNodes] = useState<Set<string>>(new Set());
   const [expandedSubtree, setExpandedSubtree] = useState<Set<string>>(new Set());
+  // Holds TOC-clicked expansions; only cleared on zoom-out, not pane clicks
+  const [pinnedExpansion, setPinnedExpansion] = useState<Set<string>>(new Set());
   // Track full viewport so panning triggers the expand/compact logic too
   const [viewport, setViewport] = useState({ x: 0, y: 0, zoom: 1 });
   const viewportDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -285,6 +357,7 @@ function KnowledgeGraphCanvasInner() {
     viewportDebounceRef.current = setTimeout(() => {
       if (viewport.zoom < 0.8) {
         setExpandedSubtree(prev => (prev.size > 0 ? new Set() : prev));
+        setPinnedExpansion(prev => (prev.size > 0 ? new Set() : prev));
         return;
       }
       if (viewport.zoom < 0.9) return; // hysteresis band — don't expand or collapse
@@ -446,7 +519,7 @@ function KnowledgeGraphCanvasInner() {
     setNodes(prev => {
       const combined = [...prev, ...newNodes] as GraphLayoutNode[];
       const allEdges = [...edges, ...newEdges];
-      return forceDirectedLayout(combined, allEdges);
+      return layout(combined, allEdges);
     });
     setEdges(prev => [...prev, ...newEdges]);
     setReasoningSteps(prev => [...prev, {
@@ -496,8 +569,9 @@ function KnowledgeGraphCanvasInner() {
           maxY = Math.max(maxY, n.position.y + 100);
         });
 
-        // Expand first, then fit bounds after nodes re-render
+        // Pin the expansion so viewport-change logic can't override it
         setExpandedSubtree(allDescendants);
+        setPinnedExpansion(allDescendants);
         setTimeout(() => {
           reactFlowInstance.fitBounds(
             { x: minX, y: minY, width: maxX - minX, height: maxY - minY },
@@ -506,6 +580,7 @@ function KnowledgeGraphCanvasInner() {
         }, 50);
       } else {
         setExpandedSubtree(allDescendants);
+        setPinnedExpansion(allDescendants);
       }
     }
   }, [nodes, edges, reactFlowInstance]);
@@ -515,25 +590,28 @@ function KnowledgeGraphCanvasInner() {
     setInputBoxPos(null);
     setHighlightedNodes(new Set());
     setExpandedSubtree(new Set());
+    setLeftPanel(false);
   }, []);
 
   const nodesWithHighlight = useMemo(() => {
     const isCompact = nodes.length > 50;
-    // Count children per node
     const childCount = new Map<string, number>();
     if (isCompact) {
       edges.forEach(e => childCount.set(e.source, (childCount.get(e.source) || 0) + 1));
     }
+    const expanded = pinnedExpansion.size > 0
+      ? new Set([...expandedSubtree, ...pinnedExpansion])
+      : expandedSubtree;
     return nodes.map(n => ({
       ...n,
-      zIndex: expandedSubtree.has(n.id) ? 10 : 0,
+      zIndex: expanded.has(n.id) ? 10 : 0,
       data: {
         ...n.data,
         isHighlighted: highlightedNodes.has(n.id),
-        compact: isCompact && (n.data as GraphNodeData).nodeType !== 'root' && (childCount.get(n.id) || 0) < 3 && !expandedSubtree.has(n.id),
+        compact: isCompact && (n.data as GraphNodeData).nodeType !== 'root' && (childCount.get(n.id) || 0) < 3 && !expanded.has(n.id),
       },
     }));
-  }, [nodes, edges, highlightedNodes, expandedSubtree]);
+  }, [nodes, edges, highlightedNodes, expandedSubtree, pinnedExpansion]);
 
   return (
     <div className="w-screen h-screen relative overflow-hidden" style={{ background: 'var(--kg-canvas)' }}>
