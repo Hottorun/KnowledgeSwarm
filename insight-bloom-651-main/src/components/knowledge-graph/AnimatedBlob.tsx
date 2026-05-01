@@ -2,7 +2,7 @@ import { motion } from 'framer-motion';
 import { useState, useCallback } from 'react';
 
 interface AnimatedBlobProps {
-  onDataSubmit: (text: string) => void;
+  onDataSubmit: (text: string, documentName?: string) => void | Promise<void>;
   isDissolving: boolean;
 }
 
@@ -31,12 +31,22 @@ export function AnimatedBlob({ onDataSubmit, isDissolving }: AnimatedBlobProps) 
       /\.(txt|md|csv|json)$/i.test(f.name)
     );
     if (files.length > 0) {
-      const texts = await Promise.all(files.map(f => f.text()));
-      onDataSubmit(texts.join('\n\n---\n\n'));
+      const contents = await Promise.all(files.map(async file => ({
+        name: file.name,
+        text: await file.text(),
+      })));
+      if (contents.length > 0) {
+        await onDataSubmit(
+          contents.map(file => `--- ${file.name} ---\n${file.text}`).join('\n\n'),
+          contents.map(file => file.name).join(', ')
+        );
+      }
       return;
     }
     const text = e.dataTransfer.getData('text');
-    if (text) onDataSubmit(text);
+    if (text) {
+      await onDataSubmit(text);
+    }
   }, [onDataSubmit]);
 
   if (isDissolving) {

@@ -24,7 +24,7 @@ import { EdgeButton } from './EdgeButton';
 import { FloatingEdge } from './FloatingEdge';
 import type { AIReasoningStep, DataSource } from './types';
 import type { NodeRelationship } from './NodeInputBox';
-import { createRun, openRunStream, expandSubtree as apiExpandSubtree } from '@/lib/api';
+import { createRun, extractFromText, openRunStream, expandSubtree as apiExpandSubtree } from '@/lib/api';
 
 type GraphLayoutNode = Node<GraphNodeData>;
 
@@ -182,72 +182,6 @@ function layout(nodes: GraphLayoutNode[], edges: Edge[]): GraphLayoutNode[] {
   return resolveOverlaps(forceDirectedLayout(nodes, edges));
 }
 
-// ── Demo seed graph ───────────────────────────────────────────────────────────
-// Produces a fake mindmap immediately so nodes are clickable for testing expansion
-// before real LLM extraction arrives via SSE.
-
-function seededRandom(seed: number): number {
-  const x = Math.sin(seed * 127.1 + 311.7) * 43758.5453;
-  return x - Math.floor(x);
-}
-
-function generateDemoGraph(text: string): { nodes: GraphLayoutNode[]; edges: Edge[]; reasoning: AIReasoningStep[] } {
-  const words = text.split(/[\s,;.]+/).filter(w => w.length > 3);
-  const topicWords = words.length >= 8
-    ? words.slice(0, 8)
-    : [...words, 'Strategy', 'Growth', 'Systems', 'Analysis', 'Research', 'Markets', 'Design', 'Operations'].slice(0, 8);
-
-  const rootId = 'root';
-  const nodes: GraphLayoutNode[] = [{
-    id: rootId,
-    type: 'graphNode',
-    position: { x: 0, y: 0 },
-    data: { label: text.slice(0, 20) || 'Knowledge Root', description: 'Root', nodeType: 'root' },
-  }];
-  const edges: Edge[] = [];
-  const reasoning: AIReasoningStep[] = [{
-    id: 'r1',
-    text: 'Demo graph ready — click any node and hit Expand to test real AI expansion via the backend.',
-    timestamp: new Date(),
-    type: 'analysis',
-  }];
-
-  const angleStep = (2 * Math.PI) / topicWords.length;
-  const baseRadius = 280;
-
-  topicWords.forEach((word, i) => {
-    const angle = angleStep * i - Math.PI / 2;
-    const topicId = `topic-${i}`;
-    const topicRadius = baseRadius + (seededRandom(i * 7 + 3) - 0.5) * 80;
-    const label = word.charAt(0).toUpperCase() + word.slice(1);
-
-    nodes.push({
-      id: topicId,
-      type: 'graphNode',
-      position: { x: Math.cos(angle) * topicRadius, y: Math.sin(angle) * topicRadius },
-      data: { label, nodeType: 'topic', description: 'Topic' },
-    });
-    edges.push({ id: `e-root-${topicId}`, source: rootId, target: topicId, type: 'floating' });
-
-    const subCount = 3;
-    for (let j = 0; j < subCount; j++) {
-      const sectorWidth = angleStep * 0.85;
-      const subAngle = angle - sectorWidth / 2 + (sectorWidth / (subCount - 1)) * j;
-      const subRadius = topicRadius + 160 + (seededRandom(i * 13 + j * 17 + 5) - 0.5) * 60;
-      const subId = `sub-${i}-${j}`;
-      nodes.push({
-        id: subId,
-        type: 'graphNode',
-        position: { x: Math.cos(subAngle) * subRadius, y: Math.sin(subAngle) * subRadius },
-        data: { label: `${label.slice(0, 6)}-${j + 1}`, description: 'Subtopic', nodeType: 'subtopic' },
-      });
-      edges.push({ id: `e-${topicId}-${subId}`, source: topicId, target: subId, type: 'floating' });
-    }
-  });
-
-  return { nodes, edges, reasoning };
-}
-
 // ── SSE payload types ─────────────────────────────────────────────────────────
 
 interface BackendNode {
@@ -287,6 +221,7 @@ function KnowledgeGraphCanvasInner() {
   const [, setDataSources] = useState<DataSource[]>([]);
   const [selectedNodeRelationships, setSelectedNodeRelationships] = useState<NodeRelationship[]>([]);
   const [reasoningSteps, setReasoningSteps] = useState<AIReasoningStep[]>([]);
+  const [runId, setRunId] = useState<string | null>(null);
   const reactFlowInstance = useReactFlow();
 
   const nodeTypes = useMemo(() => ({ graphNode: GraphNodeMemo }), []);
@@ -297,8 +232,6 @@ function KnowledgeGraphCanvasInner() {
   const [viewport, setViewport] = useState({ x: 0, y: 0, zoom: 1 });
   const viewportDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Backend integration state
-  const [runId, setRunId] = useState<string | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const nodePositionRef = useRef<Map<string, { x: number; y: number }>>(new Map());
   const childCountRef = useRef<Map<string, number>>(new Map());
@@ -351,11 +284,6 @@ function KnowledgeGraphCanvasInner() {
     return () => { if (viewportDebounceRef.current) clearTimeout(viewportDebounceRef.current); };
   }, [viewport, nodes]);
 
-  // Close SSE on unmount
-  useEffect(() => {
-    return () => { eventSourceRef.current?.close(); };
-  }, []);
-
   // Assign a spiral position to a new node that has no known parent yet
   const assignSpiralPosition = useCallback((nodeId: string): { x: number; y: number } => {
     const total = nodePositionRef.current.size;
@@ -386,48 +314,10 @@ function KnowledgeGraphCanvasInner() {
     return pos;
   }, []);
 
-  const handleDataSubmit = useCallback(async (text: string) => {
+  const connectRunStream = useCallback((activeRunId: string) => {
     eventSourceRef.current?.close();
-    eventSourceRef.current = null;
 
-    nodePositionRef.current.clear();
-    childCountRef.current.clear();
-    placeholderNodesRef.current.clear();
-
-    setIsDissolving(true);
-
-    const { nodes: demoNodes, edges: demoEdges, reasoning: demoReasoning } = generateDemoGraph(text);
-
-    // Pre-populate position refs so expansion SSE nodes land near their parent
-    demoNodes.forEach(n => nodePositionRef.current.set(n.id, n.position));
-
-    setDataSources(prev => [...prev, {
-      id: `ds-${Date.now()}`,
-      name: text.slice(0, 40) + (text.length > 40 ? '…' : ''),
-      type: 'text',
-      addedAt: new Date(),
-    }]);
-
-    let newRunId: string;
-    try {
-      newRunId = await createRun(text);
-    } catch (err) {
-      setIsDissolving(false);
-      setReasoningSteps([{
-        id: 'err-run',
-        text: `Failed to connect to backend: ${err instanceof Error ? err.message : 'Unknown error'}. Is the API running?`,
-        timestamp: new Date(),
-        type: 'analysis',
-      }]);
-      setNodes(demoNodes);
-      setEdges(demoEdges);
-      setIsEmpty(false);
-      return;
-    }
-
-    setRunId(newRunId);
-
-    const source = openRunStream(newRunId);
+    const source = openRunStream(activeRunId);
     eventSourceRef.current = source;
 
     source.addEventListener('node.created', (e: MessageEvent) => {
@@ -452,15 +342,15 @@ function KnowledgeGraphCanvasInner() {
 
       setNodes(prev => {
         if (prev.some(n => n.id === backendNode.id)) return prev;
+        const nodeType = prev.length === 0 ? 'root' : prev.length < 8 ? 'topic' : 'subtopic';
         return [...prev, {
           id: backendNode.id,
           type: 'graphNode',
           position: pos,
-          data: { label: backendNode.label, nodeType: 'subtopic', description: backendNode.type },
+          data: { label: backendNode.label, nodeType, description: backendNode.type },
         } as GraphLayoutNode];
       });
 
-      // Connect every new node back to the clicked node so nothing is orphaned
       if (anchor) {
         const bridgeEdgeId = `e-expand-${anchor.id}-${backendNode.id}`;
         setEdges(prev => prev.some(ex => ex.id === bridgeEdgeId) ? prev : [...prev, {
@@ -496,25 +386,65 @@ function KnowledgeGraphCanvasInner() {
       });
     });
 
-    source.addEventListener('agent.step', (e: MessageEvent) => {
-      const envelope = JSON.parse(e.data) as SseEnvelope<{ agentName: string; eventType: string; message: string }>;
-      const { agentName, eventType, message } = envelope.payload;
+    const addReasoning = (e: MessageEvent) => {
+      const envelope = JSON.parse(e.data) as SseEnvelope<{ agentName?: string; eventType?: string; message?: string; status?: string }>;
+      const payload = envelope.payload;
+      const eventType = payload.eventType ?? payload.status ?? envelope.type;
       setReasoningSteps(prev => [...prev, {
-        id: `r-${Date.now()}-${Math.random()}`,
-        text: `[${agentName}] ${message}`,
-        timestamp: new Date(),
+        id: `r-${Date.now()}-${prev.length}`,
+        text: payload.message ?? `[${payload.agentName ?? 'System'}] ${eventType}`,
+        timestamp: new Date(envelope.timestamp || Date.now()),
         type: eventType.includes('expand') ? 'expansion' : eventType.includes('connect') ? 'connection' : 'analysis',
       }]);
-    });
+    };
 
-    setTimeout(() => {
-      setNodes(demoNodes);
-      setEdges(demoEdges);
-      setReasoningSteps(demoReasoning);
+    source.addEventListener('agent.step', addReasoning);
+    source.addEventListener('run.status', addReasoning);
+  }, [assignSpiralPosition, assignChildPosition, setNodes, setEdges]);
+
+  useEffect(() => {
+    return () => { eventSourceRef.current?.close(); };
+  }, []);
+
+  const handleDataSubmit = useCallback(async (text: string, documentName = 'input.txt') => {
+    setIsDissolving(true);
+    expansionAnchorRef.current = null;
+    expansionChildIdxRef.current = 0;
+    eventSourceRef.current?.close();
+    eventSourceRef.current = null;
+    nodePositionRef.current.clear();
+    childCountRef.current.clear();
+    placeholderNodesRef.current.clear();
+    setNodes([]);
+    setEdges([]);
+    setReasoningSteps([]);
+
+    setDataSources(prev => [...prev, {
+      id: `ds-${Date.now()}`,
+      name: documentName === 'input.txt' ? text.slice(0, 40) + (text.length > 40 ? '...' : '') : documentName,
+      type: 'text',
+      addedAt: new Date(),
+    }]);
+
+    try {
+      const activeRunId = await createRun(text);
+      setRunId(activeRunId);
+      connectRunStream(activeRunId);
       setIsEmpty(false);
+      await extractFromText(activeRunId, text, documentName);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Backend extraction failed';
+      console.error(message, error);
+      setReasoningSteps(prev => [...prev, {
+        id: `error-${Date.now()}`,
+        text: message,
+        timestamp: new Date(),
+        type: 'analysis',
+      }]);
+    } finally {
       setIsDissolving(false);
-    }, 900);
-  }, [setNodes, setEdges, assignSpiralPosition, assignChildPosition]);
+    }
+  }, [connectRunStream, setNodes, setEdges]);
 
   const handleNodeClick = useCallback((_: React.MouseEvent, node: Node) => {
     setSelectedNode(node);
@@ -610,41 +540,15 @@ function KnowledgeGraphCanvasInner() {
 
     const nodeData = selectedNode.data as GraphNodeData;
 
-    // Close the input box immediately regardless
     setSelectedNode(null);
     setInputBoxPos(null);
 
-    // No backend connection — do a local fake expansion so the UI is testable
     if (!runId) {
-      console.warn('[KnowledgeGraph] No runId — backend not connected, using local demo expansion');
-      const count = action === 'research' ? 4 : 3;
-      const newNodes: Node[] = [];
-      const newEdges: Edge[] = [];
-      for (let i = 0; i < count; i++) {
-        const id = `demo-exp-${Date.now()}-${i}`;
-        const angle = (Math.PI * 2 / count) * i;
-        newNodes.push({
-          id,
-          type: 'graphNode',
-          position: {
-            x: selectedNode.position.x + Math.cos(angle) * 200,
-            y: selectedNode.position.y + Math.sin(angle) * 200,
-          },
-          data: { label: `${nodeData.label} › ${i + 1}`, nodeType: 'subtopic', description: 'demo' } as GraphNodeData,
-        });
-        newEdges.push({ id: `e-demo-${selectedNode.id}-${id}`, source: selectedNode.id, target: id, type: 'floating' });
-      }
-      setNodes(prev => {
-        const combined = [...prev, ...newNodes] as GraphLayoutNode[];
-        const allEdges = [...edges, ...newEdges];
-        return layout(combined, allEdges);
-      });
-      setEdges(prev => [...prev, ...newEdges]);
       setReasoningSteps(prev => [...prev, {
-        id: `r-demo-${Date.now()}`,
-        text: `[Demo] Local expansion of "${nodeData.label}" (backend not connected — restart API to get real AI expansion)`,
+        id: `error-${Date.now()}`,
+        text: 'Start a backend graph run before expanding nodes.',
         timestamp: new Date(),
-        type: 'expansion',
+        type: 'analysis',
       }]);
       return;
     }

@@ -1,286 +1,243 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
+import { persistTriple } from '../services/graph';
+import { chunkText, normalizeExtractedTriples, RawExtractedTriple } from '../services/ingestion';
+import { broadcast } from '../sse';
 import {
-  setRuntimeOpenAIKey,
+  expandSubtree,
+  extractTriplesFromChunk,
   isOpenAIConfigured,
+  setRuntimeOpenAIKey,
   validateKeyFormat,
   verifyOpenAIKey,
-  extractTriplesFromChunk,
-  expandSubtree,
 } from '../services/ai';
-import { chunkText, normalizeExtractedTriples } from '../services/ingestion';
-import { persistTriple } from '../services/graph';
-import { broadcast } from '../sse';
 
 const router = Router();
 
-// ── API key management ───────────────────────────────────────────────────────
-
-router.get('/status', (_req: Request, res: Response) => {
-  res.json({ configured: isOpenAIConfigured() });
+const extractSchema = z.object({
+  text: z.string().min(1),
+  documentName: z.string().optional().default('input'),
 });
 
-const setKeySchema = z.object({
+const keySchema = z.object({
   apiKey: z.string().min(1),
-  verify: z.boolean().optional().default(false),
+  verify: z.boolean().optional(),
+});
+
+const expandSchema = z.object({
+  rootNode: z.object({
+    id: z.string(),
+    label: z.string(),
+    type: z.string().optional(),
+  }),
+  nodes: z.array(z.object({
+    id: z.string(),
+    label: z.string(),
+    type: z.string().optional(),
+  })).optional().default([]),
+  edges: z.array(z.object({
+    subjectLabel: z.string(),
+    predicate: z.string(),
+    objectLabel: z.string(),
+  })).optional().default([]),
+  question: z.string().optional(),
+});
+
+router.get('/status', (_req: Request, res: Response) => {
+  res.json({ configured: isOpenAIConfigured(), mode: isOpenAIConfigured() ? 'openai' : 'heuristic-fallback' });
 });
 
 router.post('/key', async (req: Request, res: Response) => {
   try {
-    const { apiKey, verify } = setKeySchema.parse(req.body);
-
+    const { apiKey, verify } = keySchema.parse(req.body);
     if (!validateKeyFormat(apiKey)) {
-      return res.status(400).json({ error: 'Invalid API key format. Expected sk-...' });
+      return res.status(400).json({ error: 'Invalid OpenAI API key format' });
     }
-
     if (verify) {
-      const valid = await verifyOpenAIKey(apiKey);
-      if (!valid) {
-        return res.status(400).json({ error: 'OpenAI rejected the key. Check that it is active and has credits.' });
-      }
+      const ok = await verifyOpenAIKey(apiKey);
+      if (!ok) return res.status(400).json({ error: 'OpenAI API key verification failed' });
     }
-
     setRuntimeOpenAIKey(apiKey);
-    console.log('[ai] OpenAI API key set at runtime');
-    return res.json({ ok: true });
+    res.json({ ok: true });
   } catch (err) {
     if (err instanceof z.ZodError) {
       return res.status(400).json({ error: 'Invalid input', details: err.errors });
     }
-    const message = err instanceof Error ? err.message : 'Unknown error';
-    return res.status(500).json({ error: message });
+    return res.status(500).json({ error: 'Failed to save key' });
   }
-});
-
-// ── Extraction endpoint ───────────────────────────────────────────────────────
-// POST /ai/runs/:runId/extract
-// Accepts pre-chunked text or raw text (will chunk it here), runs LLM extraction,
-// persists raw-triples, and streams progress via SSE.
-
-const extractSchema = z.object({
-  // Option A: pass pre-chunked data
-  chunks: z.array(z.object({
-    index: z.number(),
-    text: z.string().min(1),
-  })).optional(),
-  // Option B: pass raw text and we chunk it
-  text: z.string().optional(),
-  chunkSize: z.number().int().positive().max(2000).optional(),
-  overlap: z.number().int().nonnegative().max(500).optional(),
-  documentName: z.string().optional(),
 });
 
 router.post('/runs/:runId/extract', async (req: Request, res: Response) => {
-  if (!isOpenAIConfigured()) {
-    return res.status(503).json({ error: 'OpenAI API key not configured. POST /ai/key first.' });
-  }
-
   try {
     const runId = String(req.params.runId);
-    const body = extractSchema.parse(req.body);
-    const documentName = body.documentName || 'uploaded-document';
+    const { text, documentName } = extractSchema.parse(req.body);
 
-    let chunks: Array<{ index: number; text: string }>;
-    if (body.chunks && body.chunks.length > 0) {
-      chunks = body.chunks;
-    } else if (body.text) {
-      chunks = chunkText(body.text, body.chunkSize || 500, body.overlap || 50);
+    await emit(runId, 'ExtractionAgent', 'extracting', `Extracting graph triples from ${documentName}`);
+    const chunks = chunkText(text, 500, 50);
+    let rawTriples: RawExtractedTriple[];
+
+    if (isOpenAIConfigured()) {
+      const results = await Promise.all(chunks.map(chunk => extractTriplesFromChunk(chunk.text, chunk.index, documentName)));
+      rawTriples = results.flatMap(result => result.triples);
+      const errors = results.filter(result => result.error);
+      if (errors.length > 0) {
+        await emit(runId, 'ExtractionAgent', 'warning', `${errors.length} chunk(s) failed AI extraction; using extracted triples from remaining chunks`);
+      }
+      if (rawTriples.length === 0) {
+        rawTriples = extractHeuristicTriples(text, documentName);
+      }
     } else {
-      return res.status(400).json({ error: 'Provide either chunks or text' });
+      rawTriples = extractHeuristicTriples(text, documentName);
     }
 
-    broadcast({
-      event: 'agent.step',
-      data: {
-        runId,
-        agentName: 'ExtractionAgent',
-        eventType: 'extraction.started',
-        message: `Starting AI extraction on ${chunks.length} chunk(s) from "${documentName}"`,
-        payload: { chunks: chunks.length, documentName },
-      },
-    });
+    const triples = normalizeExtractedTriples('ExtractionAgent', rawTriples);
 
-    const allTriples: ReturnType<typeof normalizeExtractedTriples> = [];
-    let errors = 0;
-
-    for (const chunk of chunks) {
-      const result = await extractTriplesFromChunk(chunk.text, chunk.index, documentName);
-
-      if (result.error) {
-        errors++;
-        broadcast({
-          event: 'agent.step',
-          data: {
-            runId,
-            agentName: 'ExtractionAgent',
-            eventType: 'extraction.chunk.error',
-            message: `Chunk ${chunk.index} failed: ${result.error}`,
-            payload: { chunkIndex: chunk.index, error: result.error },
-          },
-        });
-        continue;
-      }
-
-      if (result.triples.length === 0) continue;
-
-      const normalized = normalizeExtractedTriples('ExtractionAgent', result.triples);
-
-      for (const triple of normalized) {
-        await persistTriple(runId, triple);
-        allTriples.push(triple);
-      }
-
-      broadcast({
-        event: 'agent.step',
-        data: {
-          runId,
-          agentName: 'ExtractionAgent',
-          eventType: 'extraction.chunk.done',
-          message: `Chunk ${chunk.index}: extracted ${result.triples.length} relationship(s)`,
-          payload: { chunkIndex: chunk.index, extracted: result.triples.length },
-        },
-      });
+    for (const triple of triples) {
+      await persistTriple(runId, triple);
     }
 
-    broadcast({
-      event: 'agent.step',
-      data: {
-        runId,
-        agentName: 'ExtractionAgent',
-        eventType: 'extraction.completed',
-        message: `Extraction complete: ${allTriples.length} relationship(s) added to graph from "${documentName}"`,
-        payload: { total: allTriples.length, errors, documentName },
-      },
-    });
-
-    return res.json({
-      ok: true,
-      chunksProcessed: chunks.length,
-      triplesExtracted: allTriples.length,
-      errors,
-    });
+    await emit(runId, 'ExtractionAgent', 'completed', `Persisted ${triples.length} triples from ${documentName}`);
+    return res.json({ ok: true, extracted: rawTriples.length, persisted: triples.length });
   } catch (err) {
-    if (err instanceof z.ZodError) {
-      return res.status(400).json({ error: 'Invalid input', details: err.errors });
-    }
-    const message = err instanceof Error ? err.message : 'Unknown error';
-    console.error('Error in extract endpoint:', message);
-    return res.status(500).json({ error: message });
+    return handleRouteError(res, err, 'Extraction failed');
   }
-});
-
-// ── Subtree expansion endpoint ────────────────────────────────────────────────
-// POST /ai/runs/:runId/expand-subtree
-//
-// The frontend sends the full subtree the user clicked (root node + all
-// descendant nodes and edges). The AI generates targeted web search queries
-// from the subtree content, searches the web, synthesizes the results into
-// new SPO triples, and persists them — expanding that branch in the graph.
-
-const subtreeNodeSchema = z.object({
-  id: z.string().min(1),
-  label: z.string().min(1),
-  type: z.string().optional().default('Entity'),
-});
-
-const subtreeEdgeSchema = z.object({
-  subjectLabel: z.string().min(1),
-  predicate: z.string().min(1),
-  objectLabel: z.string().min(1),
-});
-
-const expandSubtreeSchema = z.object({
-  rootNode: subtreeNodeSchema,
-  nodes: z.array(subtreeNodeSchema).optional().default([]),
-  edges: z.array(subtreeEdgeSchema).optional().default([]),
-  question: z.string().optional(),
 });
 
 router.post('/runs/:runId/expand-subtree', async (req: Request, res: Response) => {
-  if (!isOpenAIConfigured()) {
-    return res.status(503).json({ error: 'OpenAI API key not configured. POST /ai/key first.' });
-  }
-
   try {
     const runId = String(req.params.runId);
-    const body = expandSubtreeSchema.parse(req.body);
+    const { rootNode, nodes, edges, question } = expandSchema.parse(req.body);
+    const rawTriples: RawExtractedTriple[] = [];
 
-    const allNodes = [body.rootNode, ...body.nodes.filter(n => n.id !== body.rootNode.id)];
+    let summary: string;
 
-    broadcast({
-      event: 'agent.step',
-      data: {
-        runId,
-        agentName: 'ExpansionAgent',
-        eventType: 'expansion.started',
-        message: `Expanding branch "${body.rootNode.label}" — generating search queries…`,
-        payload: {
-          rootNode: body.rootNode.label,
-          subtreeSize: allNodes.length,
-          question: body.question ?? null,
-        },
-      },
-    });
+    if (isOpenAIConfigured()) {
+      const result = await expandSubtree({
+        rootNode: { id: rootNode.id, label: rootNode.label, type: rootNode.type || 'Entity' },
+        nodes: nodes.map(node => ({ id: node.id, label: node.label, type: node.type || 'Entity' })),
+        edges,
+        question,
+      });
+      rawTriples.push(...result.newTriples);
+      summary = result.summary;
+    } else {
+      const relatedNodes = nodes.filter(node => node.id !== rootNode.id).slice(0, 4);
 
-    const result = await expandSubtree({
-      rootNode: body.rootNode,
-      nodes: allNodes,
-      edges: body.edges,
-      question: body.question,
-    });
-
-    broadcast({
-      event: 'agent.step',
-      data: {
-        runId,
-        agentName: 'ExpansionAgent',
-        eventType: 'expansion.searched',
-        message: `Web search complete: ${result.searchResultCount} result(s) from ${result.searchQueries.length} quer(y/ies)`,
-        payload: { queries: result.searchQueries, resultCount: result.searchResultCount },
-      },
-    });
-
-    // Persist all new triples and stream each one via SSE
-    let persisted = 0;
-    if (result.newTriples.length > 0) {
-      const normalized = normalizeExtractedTriples('ExpansionAgent', result.newTriples);
-      for (const triple of normalized) {
-        await persistTriple(runId, triple);
-        persisted++;
+      for (const edge of edges.slice(0, 8)) {
+        rawTriples.push({
+          subject: edge.subjectLabel,
+          predicate: edge.predicate || 'connected_to',
+          object: edge.objectLabel,
+          confidence: 0.7,
+          source: {
+            documentName: 'current-graph',
+            snippet: `${edge.subjectLabel} ${edge.predicate} ${edge.objectLabel}`,
+          },
+        });
       }
+
+      for (const node of relatedNodes) {
+        rawTriples.push({
+          subject: rootNode.label,
+          predicate: question?.toLowerCase().includes('risk') ? 'has_context' : 'connected_to',
+          object: node.label,
+          subjectType: rootNode.type || 'Entity',
+          objectType: node.type || 'Entity',
+          confidence: 0.65,
+          source: {
+            documentName: 'graph-expansion',
+            snippet: question || `Expanded from ${rootNode.label}`,
+          },
+        });
+      }
+
+      summary = `Expanded ${rootNode.label} using ${nodes.length} visible nodes and ${edges.length} visible relationships.`;
     }
 
-    broadcast({
-      event: 'agent.step',
-      data: {
-        runId,
-        agentName: 'ExpansionAgent',
-        eventType: 'expansion.completed',
-        message: `Branch "${body.rootNode.label}" expanded: ${persisted} new relationship(s) added to graph`,
-        payload: {
-          rootNode: body.rootNode.label,
-          newTriples: persisted,
-          searchQueries: result.searchQueries,
-          summary: result.summary,
-        },
-      },
-    });
+    const triples = normalizeExtractedTriples('ExpansionAgent', rawTriples);
+    for (const triple of triples) {
+      await persistTriple(runId, triple);
+    }
 
-    return res.json({
-      ok: true,
-      summary: result.summary,
-      newTriplesPersisted: persisted,
-      searchQueries: result.searchQueries,
-      searchResultCount: result.searchResultCount,
-    });
+    await emit(runId, 'ExpansionAgent', 'completed', summary);
+    return res.json({ summary, newTriplesPersisted: triples.length });
   } catch (err) {
-    if (err instanceof z.ZodError) {
-      return res.status(400).json({ error: 'Invalid input', details: err.errors });
-    }
-    const message = err instanceof Error ? err.message : 'Unknown error';
-    console.error('Error in expand-subtree endpoint:', message);
-    return res.status(500).json({ error: message });
+    return handleRouteError(res, err, 'Expansion failed');
   }
 });
+
+function extractHeuristicTriples(text: string, documentName: string): RawExtractedTriple[] {
+  const sentences = text.split(/[.!?\n]+/).map(sentence => sentence.trim()).filter(Boolean);
+  const triples: RawExtractedTriple[] = [];
+
+  for (const sentence of sentences) {
+    addMatch(triples, sentence, /(.+?)\s+acquired\s+(.+)/i, 'acquired', documentName);
+    addMatch(triples, sentence, /(.+?)\s+signed\s+(?:a\s+)?(?:supply\s+)?agreement\s+with\s+(.+)/i, 'signed_agreement_with', documentName);
+    addMatch(triples, sentence, /(.+?)\s+is\s+led\s+by\s+(.+)/i, 'led_by', documentName);
+    addMatch(triples, sentence, /(.+?)\s+develops\s+(.+)/i, 'develops', documentName);
+    addMatch(triples, sentence, /(.+?)\s+manufactures\s+(.+)/i, 'manufactures', documentName);
+    addMatch(triples, sentence, /(.+?)\s+depends\s+on\s+(.+)/i, 'depends_on', documentName);
+    addMatch(triples, sentence, /(.+?)\s+faces\s+(.+)/i, 'faces', documentName);
+    addMatch(triples, sentence, /(.+?)\s+has\s+(.+)/i, 'has', documentName);
+    addMatch(triples, sentence, /(.+?)\s+will\s+provide\s+(.+)/i, 'provides', documentName);
+  }
+
+  if (triples.length === 0) {
+    const title = documentName.replace(/\.[^.]+$/, '').replace(/[-_]+/g, ' ');
+    triples.push({
+      subject: title,
+      predicate: 'contains',
+      object: text.slice(0, 80),
+      subjectType: 'Document',
+      objectType: 'Entity',
+      confidence: 0.5,
+      source: { documentName, snippet: text.slice(0, 200) },
+    });
+  }
+
+  return triples;
+}
+
+function addMatch(
+  triples: RawExtractedTriple[],
+  sentence: string,
+  pattern: RegExp,
+  predicate: string,
+  documentName: string,
+) {
+  const match = sentence.match(pattern);
+  if (!match) return;
+
+  const subject = cleanEntity(match[1]);
+  const object = cleanEntity(match[2]);
+  if (!subject || !object || subject.length > 120 || object.length > 160) return;
+
+  triples.push({
+    subject,
+    predicate,
+    object,
+    confidence: 0.82,
+    source: { documentName, snippet: sentence },
+  });
+}
+
+function cleanEntity(value: string): string {
+  return value
+    .replace(/^(the|a|an)\s+/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+async function emit(runId: string, agentName: string, eventType: string, message: string) {
+  broadcast({ event: 'agent.step', data: { runId, agentName, eventType, message, payload: {} } });
+}
+
+function handleRouteError(res: Response, err: unknown, fallback: string) {
+  if (err instanceof z.ZodError) {
+    return res.status(400).json({ error: 'Invalid input', details: err.errors });
+  }
+  const message = err instanceof Error ? err.message : fallback;
+  return res.status(500).json({ error: message });
+}
 
 export default router;

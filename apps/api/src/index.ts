@@ -13,7 +13,7 @@ import aiRouter from './routes/ai';
 const app = express();
 
 app.use(cors({ origin: config.corsOrigins, credentials: true }));
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 
 app.use((req, _res, next) => {
   console.log(`${req.method} ${req.path}`);

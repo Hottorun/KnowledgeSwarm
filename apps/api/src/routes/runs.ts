@@ -9,7 +9,7 @@ import { chunkText, normalizeExtractedTriples } from '../services/ingestion';
 const router = Router();
 
 const createRunSchema = z.object({
-  prompt: z.string().min(1),
+  prompt: z.string().min(1).optional().default('Untitled knowledge graph'),
 });
 
 const agentEventSchema = z.object({

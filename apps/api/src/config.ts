@@ -2,8 +2,14 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 function parseCorsOrigins(raw: string | undefined): string[] {
-  if (!raw) return ['http://localhost:3000', 'http://localhost:5173'];
-  return raw.split(',').map(s => s.trim()).filter(Boolean);
+  const defaults = [
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+    'http://localhost:5173',
+    'http://127.0.0.1:5173',
+  ];
+  const configured = raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : [];
+  return Array.from(new Set([...defaults, ...configured]));
 }
 
 export const config = {

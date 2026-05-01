@@ -29,6 +29,13 @@ export interface TextChunk {
 
 const STOPWORDS = new Set(['the', 'a', 'an', 'of', 'and', 'or', 'in', 'on', 'at', 'to', 'for', 'with', 'by', 'as']);
 const PREDICATE_STOPWORDS = new Set(['a', 'an', 'the', 'of', 'with', 'by', 'to', 'from', 'in', 'on', 'for']);
+const JUNK_ENTITY_LABELS = new Set([
+  'g',
+  'grammarly',
+  'grammarly.js',
+  'mouseevent',
+  'pointerevent',
+]);
 
 export function chunkText(text: string, chunkSize = 500, overlap = 50): TextChunk[] {
   const words = text.split(/\s+/).filter(Boolean);
@@ -84,6 +91,7 @@ export function normalizePredicate(predicate: string, maxWords = 4): string {
 
 export function normalizeExtractedTriples(agentName: string | undefined, rawTriples: RawExtractedTriple[]): Triple[] {
   return rawTriples
+    .filter(raw => isUsefulEntityLabel(raw.subject) && isUsefulEntityLabel(raw.object))
     .map(raw => {
       const subjectLabel = normalizeEntityLabel(raw.subject);
       const objectLabel = normalizeEntityLabel(raw.object);
@@ -110,7 +118,7 @@ export function normalizeExtractedTriples(agentName: string | undefined, rawTrip
         properties: raw.properties || {},
       };
     })
-    .filter(triple => triple.subject.id !== triple.object.id);
+    .filter(triple => triple.subject.id !== triple.object.id && triple.subject.id !== 'entity:unknown' && triple.object.id !== 'entity:unknown');
 }
 
 function toGraphSource(source: RawSource): { url: string; title?: string; snippet?: string } {
@@ -154,4 +162,17 @@ function slugify(value: string): string {
 function clampConfidence(value: number | undefined): number | undefined {
   if (value === undefined) return undefined;
   return Math.max(0, Math.min(1, value));
+}
+
+function isUsefulEntityLabel(value: string): boolean {
+  const label = normalizeEntityLabel(value);
+  const comparable = normalizeComparableText(label);
+
+  if (label.length < 2) return false;
+  if (comparable.length < 2) return false;
+  if (JUNK_ENTITY_LABELS.has(label.toLowerCase()) || JUNK_ENTITY_LABELS.has(comparable)) return false;
+  if (/^[^\p{L}\p{N}]+$/u.test(label)) return false;
+  if (/^(error|warning|deprecated)$/i.test(label)) return false;
+
+  return true;
 }
