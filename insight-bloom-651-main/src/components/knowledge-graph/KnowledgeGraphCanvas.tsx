@@ -306,6 +306,28 @@ function formatPredicateLabel(predicate: string): string {
   return predicate.replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+function normalizeQueryText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function findReferencedNode(question: string, graphNodes: Node[]): Node | null {
+  const normalizedQuestion = ` ${normalizeQueryText(question)} `;
+  const candidates = graphNodes
+    .map(node => {
+      const label = String((node.data as GraphNodeData).label ?? '');
+      const normalizedLabel = normalizeQueryText(label);
+      return { node, label, normalizedLabel };
+    })
+    .filter(candidate => candidate.normalizedLabel.length >= 3)
+    .sort((a, b) => b.normalizedLabel.length - a.normalizedLabel.length);
+
+  return candidates.find(candidate => normalizedQuestion.includes(` ${candidate.normalizedLabel} `))?.node ?? null;
+}
+
 function GraphMiniMap({
   nodes,
   viewport,
@@ -1544,6 +1566,7 @@ function KnowledgeGraphCanvasInner() {
     // Track node count before query so we can report how many were added
     const nodeCountBefore = nodesRef.current.length;
     const preQueryNodeIds = new Set(nodesRef.current.map(n => n.id));
+    const referencedNode = findReferencedNode(question, nodesRef.current);
 
     // Flag SSE handler to commit query nodes immediately (not via batch layout)
     queryModeRef.current = true;
@@ -1558,8 +1581,37 @@ function KnowledgeGraphCanvasInner() {
       setQueryNewNodesCount(Math.max(0, added));
       // Highlight nodes that didn't exist before this query
       const newQueryNodeIds = new Set(nodesRef.current.filter(n => !preQueryNodeIds.has(n.id)).map(n => n.id));
+      if (referencedNode) {
+        setActiveNodeId(referencedNode.id);
+        setShowAllNodes(false);
+        const focusIds = new Set<string>([referencedNode.id, ...newQueryNodeIds]);
+        for (const edge of edgesRef.current) {
+          if (edge.source === referencedNode.id) focusIds.add(edge.target);
+          if (edge.target === referencedNode.id) focusIds.add(edge.source);
+        }
+        setHighlightedNodes(new Set([referencedNode.id]));
+        setExpandedSubtree(focusIds);
+        setPinnedExpansion(focusIds);
+
+        const focusNodes = nodesRef.current.filter(node => focusIds.has(node.id));
+        if (focusNodes.length > 0) {
+          let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+          focusNodes.forEach(node => {
+            minX = Math.min(minX, node.position.x - 140);
+            minY = Math.min(minY, node.position.y - 80);
+            maxX = Math.max(maxX, node.position.x + 260);
+            maxY = Math.max(maxY, node.position.y + 120);
+          });
+          window.setTimeout(() => {
+            reactFlowInstance.fitBounds(
+              { x: minX, y: minY, width: maxX - minX, height: maxY - minY },
+              { padding: 0.35, duration: 650 },
+            );
+          }, 80);
+        }
+      }
       if (newQueryNodeIds.size > 0) {
-        setAiHighlightedNodes(newQueryNodeIds);
+        setAiHighlightedNodes(new Set(referencedNode ? [referencedNode.id, ...newQueryNodeIds] : [...newQueryNodeIds]));
       }
 
       if (result.newTriplesPersisted > 0) {
@@ -1583,7 +1635,7 @@ function KnowledgeGraphCanvasInner() {
       queryModeRef.current = false;
       setIsQuerying(false);
     }
-  }, [runId, isQuerying, setReasoningSteps]);
+  }, [runId, isQuerying, reactFlowInstance, setReasoningSteps]);
 
   const handlePaneClick = useCallback(() => {
     setSelectedNode(null);
