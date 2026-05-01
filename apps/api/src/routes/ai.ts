@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
+import { extractText as extractPdfText } from 'unpdf';
 import { persistTriple } from '../services/graph';
 import { chunkText, normalizeExtractedTriples, RawExtractedTriple } from '../services/ingestion';
 import { runSwarmExtraction } from '../services/swarm';
@@ -362,6 +363,19 @@ function cleanEntity(value: string): string {
     .replace(/\s+/g, ' ')
     .trim();
 }
+
+router.post('/pdf-to-text', async (req: Request, res: Response) => {
+  try {
+    const { pdf } = z.object({ pdf: z.string().min(1) }).parse(req.body);
+    const buffer = Buffer.from(pdf, 'base64');
+    const { text } = await extractPdfText(new Uint8Array(buffer), { mergePages: true });
+    const combined = Array.isArray(text) ? text.join('\n\n') : (text ?? '');
+    if (!combined.trim()) return res.status(422).json({ error: 'PDF has no extractable text (may be image-based or scanned)' });
+    return res.json({ text: combined });
+  } catch (err) {
+    return handleRouteError(res, err, 'PDF extraction failed');
+  }
+});
 
 async function emit(runId: string, agentName: string, eventType: string, message: string) {
   broadcast({ event: 'agent.step', data: { runId, agentName, eventType, message, payload: {} } });

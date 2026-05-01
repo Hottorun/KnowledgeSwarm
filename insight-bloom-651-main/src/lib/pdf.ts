@@ -1,40 +1,31 @@
-// Vite resolves ?url imports to the correct dev/prod asset URL at build time.
-// This is a plain string — safe to import at module level even in SSR.
-import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+const API_BASE = import.meta.env?.VITE_API_BASE_URL ?? 'http://localhost:8787';
 
-let workerInitialised = false;
+async function extractPdfViaBackend(file: File): Promise<string> {
+  // btoa on large files risks stack overflow — use FileReader for safety
+  const buffer = await file.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  const base64 = btoa(binary);
 
-async function getPdfjsLib() {
-  const pdfjsLib = await import('pdfjs-dist');
-  if (!workerInitialised) {
-    pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
-    workerInitialised = true;
+  const res = await fetch(`${API_BASE}/ai/pdf-to-text`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pdf: base64 }),
+  });
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({})) as { error?: string };
+    throw new Error(body.error ?? `PDF extraction failed (${res.status})`);
   }
-  return pdfjsLib;
+
+  const { text } = await res.json() as { text: string };
+  return text;
 }
 
 export async function extractFileText(file: File): Promise<string> {
   if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
-    const pdfjsLib = await getPdfjsLib();
-    const buffer = await file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
-
-    const pageTexts: string[] = [];
-    for (let i = 1; i <= pdf.numPages; i++) {
-      const page = await pdf.getPage(i);
-      const content = await page.getTextContent();
-      const pageText = content.items
-        .map(item => ('str' in item ? item.str : ''))
-        .join(' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-      if (pageText) pageTexts.push(pageText);
-    }
-
-    const result = pageTexts.join('\n\n');
-    if (!result.trim()) throw new Error('PDF has no extractable text (may be image-based or scanned)');
-    return result;
+    return extractPdfViaBackend(file);
   }
-
   return file.text();
 }
