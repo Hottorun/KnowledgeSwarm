@@ -1590,8 +1590,6 @@ function KnowledgeGraphCanvasInner() {
           if (edge.target === referencedNode.id) focusIds.add(edge.source);
         }
         setHighlightedNodes(new Set([referencedNode.id]));
-        setExpandedSubtree(focusIds);
-        setPinnedExpansion(focusIds);
 
         const focusNodes = nodesRef.current.filter(node => focusIds.has(node.id));
         if (focusNodes.length > 0) {
@@ -1687,6 +1685,38 @@ function KnowledgeGraphCanvasInner() {
     }
     return ids;
   }, [activeNodeId, edges]);
+
+  // Whenever the focal point changes (or new neighbors arrive via SSE while
+  // it's focused), arrange the visible neighborhood as a circle around the
+  // active node. Non-visible nodes keep whatever positions they had — they
+  // don't need a layout because they're not rendered. Skipped while
+  // showAllNodes is on so the global force-directed positions stay intact
+  // for the overview view.
+  useEffect(() => {
+    if (showAllNodes || !activeNodeId) return;
+    setNodes(prev => {
+      const active = prev.find(n => n.id === activeNodeId);
+      if (!active) return prev;
+      const neighborIds = [...neighborhoodIds].filter(id => id !== activeNodeId);
+      if (neighborIds.length === 0) return prev;
+      const center = active.position;
+      // Radius scales with neighbor count so the circle never collapses into
+      // an unreadable cluster — minimum 280px so even 2-3 nodes feel spaced.
+      const radius = Math.max(280, 80 * neighborIds.length / Math.PI);
+      return prev.map(n => {
+        const idx = neighborIds.indexOf(n.id);
+        if (idx === -1) return n;
+        const angle = (idx / neighborIds.length) * 2 * Math.PI - Math.PI / 2;
+        return {
+          ...n,
+          position: {
+            x: center.x + Math.cos(angle) * radius,
+            y: center.y + Math.sin(angle) * radius,
+          },
+        };
+      });
+    });
+  }, [activeNodeId, neighborhoodIds, showAllNodes, setNodes]);
 
   // Adjacency map for fast hidden-count computation
   const adjacency = useMemo(() => {
