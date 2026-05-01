@@ -12,7 +12,7 @@ function canonicalId(type: string, label: string): string {
 
 // Remap all triple node IDs to canonical form and deduplicate
 export function normalizeTriples(triples: Triple[]): Triple[] {
-  // Step 1: build a mapping from each seen ID → canonical ID
+  // Step1: build a mapping from each seen ID → canonical ID
   // We prefer the first-seen label for a given canonical ID
   const idMap = new Map<string, string>();
 
@@ -25,14 +25,14 @@ export function normalizeTriples(triples: Triple[]): Triple[] {
     }
   }
 
-  // Step 2: remap IDs and merge properties for the same canonical node
+  // Step2: remap IDs and merge properties for the same canonical node
   const remapped = triples.map(t => ({
     ...t,
     subject: { ...t.subject, id: idMap.get(t.subject.id) ?? t.subject.id },
     object: { ...t.object, id: idMap.get(t.object.id) ?? t.object.id },
   }));
 
-  // Step 3: deduplicate by subject-predicate-object key (keep highest confidence)
+  // Step3: deduplicate by subject-predicate-object key (keep highest confidence)
   const seen = new Map<string, Triple>();
   for (const t of remapped) {
     const key = `${t.subject.id}|${t.predicate}|${t.object.id}`;
@@ -43,4 +43,21 @@ export function normalizeTriples(triples: Triple[]): Triple[] {
   }
 
   return Array.from(seen.values());
+}
+
+// Normalize triples and deduplicate against an existing set of keys
+// Returns only the new triples that weren't already emitted
+export function normalizeAndDeduplicate(triples: Triple[], emittedKeys: Set<string>): Triple[] {
+  const normalized = normalizeTriples(triples);
+  const newTriples: Triple[] = [];
+
+  for (const t of normalized) {
+    const key = `${t.subject.id}|${t.predicate}|${t.object.id}`;
+    if (!emittedKeys.has(key)) {
+      emittedKeys.add(key);
+      newTriples.push(t);
+    }
+  }
+
+  return newTriples;
 }

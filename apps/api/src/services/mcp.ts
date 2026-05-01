@@ -10,12 +10,13 @@ export interface McpToolResult {
   isError?: boolean;
 }
 
-async function callMcpServer(tool: McpToolCall): Promise<McpToolResult> {
-  if (!config.mcpServerUrl) {
+async function callMcpServer(tool: McpToolCall, mcpServerUrl?: string): Promise<McpToolResult> {
+  const serverUrl = mcpServerUrl || config.mcpServerUrl;
+  if (!serverUrl) {
     throw new Error('MCP_SERVER_URL not configured');
   }
 
-  const response = await fetch(`${config.mcpServerUrl}/tools/call`, {
+  const response = await fetch(`${serverUrl}/tools/call`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -31,27 +32,28 @@ async function callMcpServer(tool: McpToolCall): Promise<McpToolResult> {
   return response.json() as Promise<McpToolResult>;
 }
 
-export async function mcpSearch(query: string): Promise<McpToolResult> {
+export async function mcpSearch(query: string, mcpServerUrl?: string): Promise<McpToolResult> {
   return callMcpServer({
     name: 'search',
     arguments: { query },
-  });
+  }, mcpServerUrl);
 }
 
-export async function mcpFetch(url: string): Promise<McpToolResult> {
+export async function mcpFetch(url: string, mcpServerUrl?: string): Promise<McpToolResult> {
   return callMcpServer({
     name: 'fetch',
     arguments: { url },
-  });
+  }, mcpServerUrl);
 }
 
-export async function mcpListTools(): Promise<string[]> {
-  if (!config.mcpServerUrl) {
+export async function mcpListTools(mcpServerUrl?: string): Promise<string[]> {
+  const serverUrl = mcpServerUrl || config.mcpServerUrl;
+  if (!serverUrl) {
     return [];
   }
 
   try {
-    const response = await fetch(`${config.mcpServerUrl}/tools/list`);
+    const response = await fetch(`${serverUrl}/tools/list`);
     if (!response.ok) return [];
     const data = await response.json() as { tools?: Array<{ name?: unknown }> };
     return (data.tools || []).map((t: Record<string, unknown>) => t.name as string);
@@ -60,37 +62,37 @@ export async function mcpListTools(): Promise<string[]> {
   }
 }
 
-export async function mcpListDirectory(path: string): Promise<McpToolResult> {
+export async function mcpListDirectory(path: string, mcpServerUrl?: string): Promise<McpToolResult> {
   return callMcpServer({
     name: 'list_directory',
     arguments: { path },
-  });
+  }, mcpServerUrl);
 }
 
-export async function mcpReadFile(path: string): Promise<McpToolResult> {
+export async function mcpReadFile(path: string, mcpServerUrl?: string): Promise<McpToolResult> {
   return callMcpServer({
     name: 'read_file',
     arguments: { path },
-  });
+  }, mcpServerUrl);
 }
 
-export async function mcpReadMultipleFiles(paths: string[]): Promise<McpToolResult> {
+export async function mcpReadMultipleFiles(paths: string[], mcpServerUrl?: string): Promise<McpToolResult> {
   return callMcpServer({
     name: 'read_multiple_files',
     arguments: { paths },
-  });
+  }, mcpServerUrl);
 }
 
-export async function mcpSearchFiles(basePath: string, pattern: string): Promise<McpToolResult> {
+export async function mcpSearchFiles(basePath: string, pattern: string, mcpServerUrl?: string): Promise<McpToolResult> {
   return callMcpServer({
     name: 'search_files',
     arguments: { path: basePath, pattern },
-  });
+  }, mcpServerUrl);
 }
 
-export async function mcpListAllowedDirectories(): Promise<McpToolResult> {
+export async function mcpListAllowedDirectories(mcpServerUrl?: string): Promise<McpToolResult> {
   return callMcpServer({
     name: 'list_allowed_directories',
     arguments: {},
-  });
+  }, mcpServerUrl);
 }

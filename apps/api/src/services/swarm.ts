@@ -16,7 +16,7 @@ export function runSwarmExtraction(runId: string, text: string, documentName = '
       return;
     }
 
-    const child = spawn('npm', ['run', 'orchestrate', '--', '--run-id', runId, '--document-name', documentName, '--stdin'], {
+    const child = spawn('node', ['dist/index.js', '--', '--run-id', runId, '--document-name', documentName, '--stdin'], {
       cwd: config.swarmOrchestratorCwd,
       env: {
         ...process.env,

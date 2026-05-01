@@ -2,12 +2,25 @@ import { config } from './config';
 import { decomposeDocument } from './agents/meta';
 import { runSupervisor } from './agents/supervisor';
 import { specialistForBranch } from './agents/specialists';
-import { emitAgentEvent, emitTriples } from './tools/emit';
-import { normalizeTriples } from './ingest/normalizer';
+import { emitAgentEvent, emitTriples, setEmitCallbacks, EmitCallbacks } from './tools/emit';
+import { normalizeTriples, normalizeAndDeduplicate } from './ingest/normalizer';
 import { chunkText, buildDocumentSummary } from './ingest/chunker';
 export { expandNode } from './agents/expander';
 
-export async function orchestrate(runId: string, documentText: string, documentName = 'input'): Promise<void> {
+export interface OrchestratorCallbacks extends EmitCallbacks {
+  // Additional orchestrator-level callbacks can be added here
+}
+
+export async function orchestrate(
+  runId: string,
+  documentText: string,
+  documentName = 'input',
+  callbacks?: OrchestratorCallbacks,
+): Promise<void> {
+  if (callbacks) {
+    setEmitCallbacks(callbacks);
+  }
+
   console.log(`\n[orchestrator] run=${runId} stub=${config.stubMode}`);
 
   await emitAgentEvent(runId, 'MetaAgent', 'chunking', `Splitting ${documentName} into chunks`);
@@ -45,29 +58,48 @@ export async function orchestrate(runId: string, documentText: string, documentN
     })),
   });
 
-  const results = await Promise.allSettled(
-    branches.map((branch, i) => runSupervisor(runId, branch, branchChunks[i], specialists[i], documentName))
+  // Track already-emitted triple keys to avoid duplicates across branches
+  const emittedKeys = new Set<string>();
+  let totalNormalized = 0;
+
+  // Process branches as they complete (not all at once)
+  const branchPromises = branches.map((branch, i) =>
+    runSupervisor(runId, branch, branchChunks[i], specialists[i], documentName)
+      .then(triples => ({ status: 'fulfilled' as const, value: triples, branch, i }))
+      .catch(error => ({ status: 'rejected' as const, reason: error, branch, i }))
   );
 
-  const allTriples = results.flatMap(r => r.status === 'fulfilled' ? r.value : []);
+  // Poll for completed branches and emit incrementally
+  const pending = new Set(branchPromises);
+  while (pending.size > 0) {
+    const result = await Promise.race(pending);
+    pending.delete(result as any);
 
-  results.forEach((r, i) => {
-    if (r.status === 'rejected') {
-      console.error(`[orchestrator] branch "${branches[i].id}" failed:`, r.reason);
+    if (result.status === 'fulfilled') {
+      const { value: triples, branch } = result;
+      console.log(`[orchestrator] branch "${branch.id}" completed with ${triples.length} triples`);
+
+      if (triples.length > 0) {
+        await emitAgentEvent(runId, 'MetaAgent', 'normalizing', `Deduplicating branch "${branch.label}"`);
+        const newTriples = normalizeAndDeduplicate(triples, emittedKeys);
+        console.log(`[orchestrator] branch "${branch.id}": ${triples.length} raw → ${newTriples.length} new triples`);
+        if (newTriples.length > 0) {
+          await emitTriples(runId, 'MetaAgent', newTriples);
+          totalNormalized += newTriples.length;
+        }
+      }
+    } else {
+      console.error(`[orchestrator] branch "${result.branch.id}" failed:`, result.reason);
     }
-  });
+  }
 
-  await emitAgentEvent(runId, 'MetaAgent', 'normalizing', 'Deduplicating and normalizing entities');
-  const normalized = normalizeTriples(allTriples);
-
-  console.log(`[orchestrator] ${allTriples.length} raw → ${normalized.length} normalized triples`);
-  if (normalized.length === 0) {
+  console.log(`[orchestrator] total normalized triples: ${totalNormalized}`);
+  if (totalNormalized === 0) {
     await emitAgentEvent(runId, 'MetaAgent', 'failed', 'Swarm extracted 0 triples; falling back to generic extraction');
     throw new Error('Swarm extracted 0 triples');
   }
 
-  await emitTriples(runId, 'MetaAgent', normalized);
-  await emitAgentEvent(runId, 'MetaAgent', 'completed', `Done. ${normalized.length} triples in graph`);
+  await emitAgentEvent(runId, 'MetaAgent', 'completed', `Done. ${totalNormalized} triples in graph`);
 }
 
 async function main() {
