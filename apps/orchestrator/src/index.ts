@@ -63,17 +63,26 @@ export async function orchestrate(
   let totalNormalized = 0;
 
   // Process branches as they complete (not all at once)
-  const branchPromises = branches.map((branch, i) =>
-    runSupervisor(runId, branch, branchChunks[i], specialists[i], documentName)
+  type BranchResult =
+    | { status: 'fulfilled'; value: Awaited<ReturnType<typeof runSupervisor>>; branch: typeof branches[number]; i: number }
+    | { status: 'rejected'; reason: unknown; branch: typeof branches[number]; i: number };
+  type BranchTask = Promise<{ result: BranchResult; task: BranchTask }>;
+
+  const branchPromises: BranchTask[] = branches.map((branch, i) => {
+    const work: Promise<BranchResult> = runSupervisor(runId, branch, branchChunks[i], specialists[i], documentName)
       .then(triples => ({ status: 'fulfilled' as const, value: triples, branch, i }))
-      .catch(error => ({ status: 'rejected' as const, reason: error, branch, i }))
-  );
+      .catch(error => ({ status: 'rejected' as const, reason: error, branch, i }));
+
+    let task: BranchTask;
+    task = work.then(result => ({ result, task }));
+    return task;
+  });
 
   // Poll for completed branches and emit incrementally
   const pending = new Set(branchPromises);
   while (pending.size > 0) {
-    const result = await Promise.race(pending);
-    pending.delete(result as any);
+    const { result, task } = await Promise.race(pending);
+    pending.delete(task);
 
     if (result.status === 'fulfilled') {
       const { value: triples, branch } = result;

@@ -4,6 +4,7 @@ import { config } from '../config';
 export interface SwarmRunResult {
   ok: boolean;
   code: number | null;
+  signal: NodeJS.Signals | null;
   stdout: string;
   stderr: string;
 }
@@ -52,11 +53,11 @@ export function runSwarmExtraction(runId: string, text: string, documentName = '
       reject(err);
     });
 
-    child.on('close', code => {
+    child.on('close', (code, signal) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
-      resolve({ ok: code === 0, code, stdout, stderr });
+      resolve({ ok: code === 0, code, signal, stdout, stderr });
     });
 
     child.stdin.end(text);

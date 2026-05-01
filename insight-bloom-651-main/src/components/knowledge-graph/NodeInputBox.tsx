@@ -6,6 +6,7 @@ export interface NodeRelationship {
   direction: 'out' | 'in';
   predicate: string;
   otherLabel: string;
+  sources?: Array<{ title?: string; url?: string; snippet?: string }>;
 }
 
 interface NodeInputBoxProps {
@@ -170,6 +171,15 @@ export function NodeInputBox({ nodeLabel, entityType, relationships = [], positi
                   <span className="font-medium truncate" style={{ color: 'var(--foreground)' }}>
                     "{rel.otherLabel}"
                   </span>
+                  {rel.sources && rel.sources.length > 0 && (
+                    <span
+                      className="ml-auto min-w-0 truncate text-[10px]"
+                      title={rel.sources.map(source => source.snippet || source.title || source.url).filter(Boolean).join('\n')}
+                      style={{ color: 'var(--muted-foreground)' }}
+                    >
+                      {rel.sources[0].title || rel.sources[0].url}
+                    </span>
+                  )}
                 </div>
               ))}
             </div>

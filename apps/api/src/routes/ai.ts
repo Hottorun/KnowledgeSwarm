@@ -123,12 +123,15 @@ router.post('/runs/:runId/swarm-extract', async (req: Request, res: Response) =>
     const result = await runSwarmExtraction(runId, text, documentName);
 
     if (!result.ok) {
+      const details = (result.stderr || result.stdout).slice(-2000);
+      const exitStatus = result.code === null ? `signal ${result.signal ?? 'unknown'}` : `code ${result.code}`;
       console.error('[swarm] failed:', result.stderr || result.stdout);
-      await emit(runId, 'SwarmOrchestrator', 'failed', `Specialist swarm failed with code ${result.code ?? 'unknown'}`);
+      await emit(runId, 'SwarmOrchestrator', 'failed', `Specialist swarm failed with ${exitStatus}: ${details.slice(-500)}`);
       return res.status(502).json({
         error: 'Specialist swarm failed',
         code: result.code,
-        details: (result.stderr || result.stdout).slice(-2000),
+        signal: result.signal,
+        details,
       });
     }
 

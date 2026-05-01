@@ -25,7 +25,7 @@ import { EdgeButton } from './EdgeButton';
 import { FloatingEdge } from './FloatingEdge';
 import type { AIReasoningStep, DataSource } from './types';
 import type { NodeRelationship } from './NodeInputBox';
-import { createRun, extractFromText, extractFromFile, openRunStream, expandSubtree as apiExpandSubtree, categorizeNodes, type ExpandContext, type NodeCategory } from '@/lib/api';
+import { createRun, extractFromText, openRunStream, expandSubtree as apiExpandSubtree, categorizeNodes, type ExpandContext, type NodeCategory } from '@/lib/api';
 
 type GraphLayoutNode = Node<GraphNodeData>;
 
@@ -220,6 +220,14 @@ interface BackendEdge {
   target: string;
   predicate: string;
   confidence?: number;
+  sources?: BackendSource[];
+  properties?: Record<string, unknown>;
+}
+
+interface BackendSource {
+  url: string;
+  title?: string;
+  snippet?: string;
 }
 
 interface SseEnvelope<T> {
@@ -286,6 +294,16 @@ function assignAnimDelays(nodes: Node[], edges: Edge[]): { nodes: Node[]; edges:
   };
 }
 
+function formatSourceLabel(sources: BackendSource[]): string | undefined {
+  const source = sources.find(item => item.title || item.url);
+  if (!source) return undefined;
+  return source.title || source.url.replace(/^local:\/\//, '');
+}
+
+function formatPredicateLabel(predicate: string): string {
+  return predicate.replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 function KnowledgeGraphCanvasInner() {
@@ -342,6 +360,8 @@ function KnowledgeGraphCanvasInner() {
   // never appear in unsorted positions.
   const pendingNodesRef = useRef<Map<string, GraphLayoutNode>>(new Map());
   const pendingEdgesRef = useRef<Map<string, Edge>>(new Map());
+  const appendModeRef = useRef(false);
+  const activeNodeIdsRef = useRef<Set<string>>(new Set());
   // Undo history — snapshots of {nodes, edges} before each expansion/deletion
   const historyRef = useRef<Array<{ nodes: Node[]; edges: Edge[] }>>([]);
   const redoStackRef = useRef<Array<{ nodes: Node[]; edges: Edge[] }>>([]);
@@ -505,6 +525,7 @@ function KnowledgeGraphCanvasInner() {
         position: pos,
         data: { label: backendNode.label, nodeType, description: backendNode.type, parentId: anchor?.id },
       };
+      activeNodeIdsRef.current.add(backendNode.id);
 
       if (anchor) {
         // Track this node so chain edges (newNode → newerNode) survive the
@@ -519,8 +540,15 @@ function KnowledgeGraphCanvasInner() {
           label: 'expands', type: 'floating',
         }]);
       } else {
-        // Initial load: buffer — nodes appear only after layout is done
-        pendingNodesRef.current.set(backendNode.id, newNode);
+        if (appendModeRef.current) {
+          // Document uploads after the first graph should extend the current
+          // graph in-place. Do not use the initial-load pending buffer here;
+          // a later batch commit can replace the visible graph.
+          setNodes(prev => prev.some(n => n.id === backendNode.id) ? prev : [...prev, newNode]);
+        } else {
+          // Initial load: buffer — nodes appear only after layout is done
+          pendingNodesRef.current.set(backendNode.id, newNode);
+        }
       }
 
       // Debounced commit + layout — fires after the SSE burst settles
@@ -532,6 +560,7 @@ function KnowledgeGraphCanvasInner() {
         if (isBatchMode && pendingNodesRef.current.size > 0) {
           const pNodes = [...pendingNodesRef.current.values()];
           const pEdges = [...pendingEdgesRef.current.values()];
+          const hadCommittedNodes = nodesRef.current.length > 0;
           pendingNodesRef.current.clear();
           pendingEdgesRef.current.clear();
 
@@ -547,12 +576,14 @@ function KnowledgeGraphCanvasInner() {
           setEdges(animated.edges);
           setIsProcessing(false);
 
-          // Double-rAF: first fires after React's commit, second after the browser paints layout
-          requestAnimationFrame(() => {
+          if (!hadCommittedNodes) {
+            // Double-rAF: first fires after React's commit, second after the browser paints layout
             requestAnimationFrame(() => {
-              reactFlowInstance.fitView({ padding: 0.12, duration: 0 });
+              requestAnimationFrame(() => {
+                reactFlowInstance.fitView({ padding: 0.12, duration: 0 });
+              });
             });
-          });
+          }
         } else {
           // Expansion: just re-layout existing committed nodes
           setNodes(prev => layout(prev as GraphLayoutNode[], edgesRef.current, userMovedRef.current) as Node[]);
@@ -566,10 +597,10 @@ function KnowledgeGraphCanvasInner() {
       const anchor = expansionAnchorRef.current;
 
       const sourceInGraph =
-        nodesRef.current.some(n => n.id === backendEdge.source) ||
+        activeNodeIdsRef.current.has(backendEdge.source) ||
         pendingNodesRef.current.has(backendEdge.source);
       const targetInGraph =
-        nodesRef.current.some(n => n.id === backendEdge.target) ||
+        activeNodeIdsRef.current.has(backendEdge.target) ||
         pendingNodesRef.current.has(backendEdge.target);
 
       if (!sourceInGraph && !targetInGraph) return;
@@ -596,6 +627,11 @@ function KnowledgeGraphCanvasInner() {
 
       const edgeSource = sourceInGraph ? backendEdge.source : (anchor?.id ?? backendEdge.source);
       const edgeId = `${edgeSource}:${backendEdge.predicate}:${backendEdge.target}`;
+      const edgeData = {
+        confidence: backendEdge.confidence,
+        sources: backendEdge.sources ?? [],
+        sourceLabel: formatSourceLabel(backendEdge.sources ?? []),
+      };
 
       if (anchor) {
         setEdges(prev => {
@@ -609,7 +645,16 @@ function KnowledgeGraphCanvasInner() {
           return [...filtered, {
             id: edgeId, source: edgeSource, target: backendEdge.target,
             label: backendEdge.predicate, type: 'floating',
-            data: { confidence: backendEdge.confidence },
+            data: edgeData,
+          }];
+        });
+      } else if (appendModeRef.current) {
+        setEdges(prev => {
+          if (prev.some(edge => edge.id === edgeId)) return prev;
+          return [...prev, {
+            id: edgeId, source: edgeSource, target: backendEdge.target,
+            label: backendEdge.predicate, type: 'floating',
+            data: edgeData,
           }];
         });
       } else {
@@ -618,10 +663,37 @@ function KnowledgeGraphCanvasInner() {
           pendingEdgesRef.current.set(edgeId, {
             id: edgeId, source: edgeSource, target: backendEdge.target,
             label: backendEdge.predicate, type: 'floating',
-            data: { confidence: backendEdge.confidence },
+            data: edgeData,
           });
         }
       }
+    });
+
+    source.addEventListener('source.created', (e: MessageEvent) => {
+      const envelope = JSON.parse(e.data) as SseEnvelope<{ edge?: Pick<BackendEdge, 'source' | 'target' | 'predicate'>; source: BackendSource }>;
+      const edge = envelope.payload.edge;
+      if (!edge) return;
+
+      const edgeId = `${edge.source}:${edge.predicate}:${edge.target}`;
+      const addSource = (existing: Edge): Edge => {
+        const currentSources = ((existing.data as { sources?: BackendSource[] } | undefined)?.sources ?? []);
+        if (currentSources.some(source => source.url === envelope.payload.source.url && source.title === envelope.payload.source.title)) {
+          return existing;
+        }
+        const sources = [...currentSources, envelope.payload.source];
+        return {
+          ...existing,
+          data: {
+            ...(existing.data ?? {}),
+            sources,
+            sourceLabel: formatSourceLabel(sources),
+          },
+        };
+      };
+
+      setEdges(prev => prev.map(existing => existing.id === edgeId ? addSource(existing) : existing));
+      const pending = pendingEdgesRef.current.get(edgeId);
+      if (pending) pendingEdgesRef.current.set(edgeId, addSource(pending));
     });
 
     const addReasoning = (e: MessageEvent) => {
@@ -657,7 +729,10 @@ function KnowledgeGraphCanvasInner() {
     };
   }, []);
 
-  useEffect(() => { nodesRef.current = nodes; }, [nodes]);
+  useEffect(() => {
+    nodesRef.current = nodes;
+    activeNodeIdsRef.current = new Set(nodes.map(node => node.id));
+  }, [nodes]);
 
   const handleDataSubmit = useCallback(async (text: string, documentName = 'input.txt') => {
     setIsDissolving(true);
@@ -738,14 +813,15 @@ function KnowledgeGraphCanvasInner() {
       .slice(0, 4)
       .map(e => {
         const predicate = (typeof e.label === 'string' && e.label && e.label !== 'expands')
-          ? e.label
+          ? formatPredicateLabel(e.label)
           : (e.data as { predicate?: string })?.predicate ?? 'relates to';
+        const sources = ((e.data as { sources?: BackendSource[] } | undefined)?.sources ?? []);
         if (e.source === node.id) {
           const other = nodes.find(n => n.id === e.target);
-          return { direction: 'out' as const, predicate, otherLabel: (other?.data as GraphNodeData)?.label ?? e.target };
+          return { direction: 'out' as const, predicate, otherLabel: (other?.data as GraphNodeData)?.label ?? e.target, sources };
         } else {
           const other = nodes.find(n => n.id === e.source);
-          return { direction: 'in' as const, predicate, otherLabel: (other?.data as GraphNodeData)?.label ?? e.source };
+          return { direction: 'in' as const, predicate, otherLabel: (other?.data as GraphNodeData)?.label ?? e.source, sources };
         }
       });
     setSelectedNodeRelationships(rels);
@@ -1206,10 +1282,48 @@ function KnowledgeGraphCanvasInner() {
 
   const handleUploadDocuments = useCallback(async (files: File[]) => {
     if (!runId) return;
-    for (const file of files) {
-      await extractFromFile(runId, file);
+    if (!eventSourceRef.current || eventSourceRef.current.readyState === EventSource.CLOSED) {
+      connectRunStream(runId);
     }
-  }, [runId]);
+
+    appendModeRef.current = true;
+    pendingNodesRef.current.clear();
+    pendingEdgesRef.current.clear();
+    setIsProcessing(true);
+    setReasoningSteps(prev => [...prev, {
+      id: `upload-${Date.now()}`,
+      text: `Adding ${files.length} document${files.length === 1 ? '' : 's'} to the current graph`,
+      timestamp: new Date(),
+      type: 'analysis',
+    }]);
+
+    for (const file of files) {
+      setDataSources(prev => [...prev, {
+        id: `ds-${Date.now()}-${file.name}`,
+        name: file.name,
+        type: 'file',
+        addedAt: new Date(),
+      }]);
+
+      try {
+        const text = await file.text();
+        await extractFromText(runId, text, file.name);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : `Failed to extract ${file.name}`;
+        console.error(message, error);
+        setReasoningSteps(prev => [...prev, {
+          id: `upload-error-${Date.now()}-${file.name}`,
+          text: `${file.name}: ${message}`,
+          timestamp: new Date(),
+          type: 'analysis',
+        }]);
+      }
+    }
+    setIsProcessing(false);
+    window.setTimeout(() => {
+      appendModeRef.current = false;
+    }, 1000);
+  }, [connectRunStream, runId]);
 
   // Re-categorize nodes 2s after graph settles (initial load or after expansion)
   useEffect(() => {
@@ -1314,8 +1428,34 @@ function KnowledgeGraphCanvasInner() {
         <AnimatedBlob onDataSubmit={handleDataSubmit} isDissolving={isDissolving} />
       )}
 
-      {/* Loading blob — shown from submit until first node arrives */}
-      <LoadingBlob isVisible={isProcessing} reasoningSteps={reasoningSteps} />
+      {/* Loading blob — only for the first graph build. Later uploads append in-place. */}
+      <LoadingBlob isVisible={isProcessing && nodes.length === 0} reasoningSteps={reasoningSteps} />
+
+      <AnimatePresence>
+        {isProcessing && nodes.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 8 }}
+            transition={{ duration: 0.18 }}
+            className="fixed bottom-5 right-5 z-30 px-3 py-2 rounded-full text-xs font-medium flex items-center gap-2"
+            style={{
+              background: 'var(--kg-node-bg)',
+              border: '1px solid var(--kg-node-border)',
+              boxShadow: 'var(--kg-shadow-md)',
+              color: 'var(--foreground)',
+            }}
+          >
+            <motion.span
+              animate={{ rotate: 360 }}
+              transition={{ duration: 1.2, repeat: Infinity, ease: 'linear' }}
+              className="inline-block w-3 h-3 rounded-full"
+              style={{ borderTop: '2px solid var(--primary)', borderRight: '2px solid transparent' }}
+            />
+            Adding to graph
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Node input box */}
       <AnimatePresence>

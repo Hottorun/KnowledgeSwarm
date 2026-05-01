@@ -13,6 +13,7 @@ export interface GraphEdge {
   target: string;
   predicate: string;
   confidence?: number;
+  sources?: Source[];
   properties: Record<string, unknown>;
 }
 
@@ -99,11 +100,35 @@ export async function persistTriple(runId: string, triple: Triple): Promise<void
 
   broadcast({ event: 'node.created', data: { runId, node: triple.subject } });
   broadcast({ event: 'node.created', data: { runId, node: triple.object } });
-  broadcast({ event: 'edge.created', data: { runId, edge: { source: triple.subject.id, target: triple.object.id, predicate: triple.predicate, confidence: triple.confidence } } });
+  broadcast({
+    event: 'edge.created',
+    data: {
+      runId,
+      edge: {
+        source: triple.subject.id,
+        target: triple.object.id,
+        predicate: triple.predicate,
+        confidence: triple.confidence,
+        sources: triple.sources || [],
+        properties: triple.properties || {},
+      },
+    },
+  });
 
   if (triple.sources) {
     for (const source of triple.sources) {
-      broadcast({ event: 'source.created', data: { runId, source } });
+      broadcast({
+        event: 'source.created',
+        data: {
+          runId,
+          edge: {
+            source: triple.subject.id,
+            target: triple.object.id,
+            predicate: triple.predicate,
+          },
+          source,
+        },
+      });
     }
   }
 }

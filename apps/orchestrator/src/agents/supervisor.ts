@@ -5,7 +5,7 @@ import { emitAgentEvent } from '../tools/emit';
 import { runWorker } from './worker';
 import type { SpecialistProfile } from './specialists';
 import { specialistDisplayName } from './specialists';
-import { parseJsonObject } from './json';
+import { parseJsonArrayPropertyItems, parseJsonObject } from './json';
 
 const client = new Anthropic({ apiKey: config.anthropicApiKey });
 
@@ -96,11 +96,29 @@ ${JSON.stringify(triples)}`,
   });
 
   const text = response.content.find(b => b.type === 'text')?.text ?? '';
-  const output = parseJsonObject<SupervisorOutput>(text);
+  const output = parseSupervisorOutput(text);
 
-  output.rejected.forEach(r =>
+  output.rejected?.forEach(r =>
     console.log(`  [supervisor:${branch.id}] rejected: ${r.triple.subject.id}->${r.triple.object.id} - ${r.reason}`)
   );
 
   return output.approved;
+}
+
+function parseSupervisorOutput(text: string): SupervisorOutput {
+  try {
+    const output = parseJsonObject<SupervisorOutput>(text);
+    return {
+      approved: output.approved ?? [],
+      rejected: output.rejected ?? [],
+    };
+  } catch (error) {
+    const approved = parseJsonArrayPropertyItems(text, 'approved') as Triple[];
+    if (approved.length > 0) {
+      console.warn(`[supervisor] repaired malformed JSON output; salvaged ${approved.length} approved triple(s)`);
+      return { approved, rejected: [] };
+    }
+
+    throw error;
+  }
 }
