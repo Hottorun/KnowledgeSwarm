@@ -185,7 +185,7 @@ export function NodeInputBox({ nodeLabel, entityType, relationships = [], positi
               </svg>
               <span className="text-[11px]" style={{ color: 'var(--muted-foreground)' }}>Generating summary…</span>
             </div>
-          ) : aiDescription ? (
+          ) : aiDescription != null ? (
             <p className="text-[11px] leading-relaxed" style={{ color: 'var(--muted-foreground)' }}>
               {aiDescription}
             </p>
