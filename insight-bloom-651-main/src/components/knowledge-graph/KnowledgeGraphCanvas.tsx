@@ -15,7 +15,7 @@ import {
 import '@xyflow/react/dist/style.css';
 import { AnimatePresence } from 'framer-motion';
 
-import { AnimatedBlob } from './AnimatedBlob';
+import { AnimatedBlob, LoadingBlob } from './AnimatedBlob';
 import { GraphNodeMemo, calcNodeDims, type GraphNodeData } from './GraphNode';
 import { NodeInputBox } from './NodeInputBox';
 import { SidePanel } from './SidePanel';
@@ -236,6 +236,7 @@ function KnowledgeGraphCanvasInner() {
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [isEmpty, setIsEmpty] = useState(true);
   const [isDissolving, setIsDissolving] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
   const [selectedNode, setSelectedNode] = useState<Node | null>(null);
   const [inputBoxPos, setInputBoxPos] = useState<{ x: number; y: number } | null>(null);
   const [leftPanel, setLeftPanel] = useState(false);
@@ -266,6 +267,10 @@ function KnowledgeGraphCanvasInner() {
   const expansionDepthRef = useRef<number>(0);
   const layoutDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const edgesRef = useRef<Edge[]>([]);
+  // Buffers for initial-load SSE events — committed all-at-once after layout so nodes
+  // never appear in unsorted positions.
+  const pendingNodesRef = useRef<Map<string, GraphLayoutNode>>(new Map());
+  const pendingEdgesRef = useRef<Map<string, Edge>>(new Map());
 
   useOnViewportChange({
     onChange: useCallback((vp: { x: number; y: number; zoom: number }) => {
@@ -356,21 +361,17 @@ function KnowledgeGraphCanvasInner() {
       const backendNode = envelope.payload.node;
       const anchor = expansionAnchorRef.current;
 
-      // Case-insensitive label dedup against current graph
+      // dedup: also check pending buffer, not just committed nodes
       const normalLabel = backendNode.label.toLowerCase().trim();
-      const existingByLabel = nodesRef.current.find(
-        n => n.id !== backendNode.id && ((n.data as GraphNodeData).label ?? '').toLowerCase().trim() === normalLabel
-      );
+      const existingByLabel =
+        nodesRef.current.find(n => n.id !== backendNode.id && ((n.data as GraphNodeData).label ?? '').toLowerCase().trim() === normalLabel) ??
+        [...pendingNodesRef.current.values()].find(n => n.id !== backendNode.id && n.data.label.toLowerCase().trim() === normalLabel);
       if (existingByLabel) {
-        // Node already exists — draw a connecting edge instead of adding a duplicate
         if (anchor) {
           const reuseId = `e-reuse-${anchor.id}-${existingByLabel.id}`;
           setEdges(prev => prev.some(ex => ex.id === reuseId) ? prev : [...prev, {
-            id: reuseId,
-            source: anchor.id,
-            target: existingByLabel.id,
-            label: 'also connects',
-            type: 'floating',
+            id: reuseId, source: anchor.id, target: existingByLabel.id,
+            label: 'also connects', type: 'floating',
           }]);
         }
         return;
@@ -382,55 +383,69 @@ function KnowledgeGraphCanvasInner() {
         const idx = expansionChildIdxRef.current++;
         const angle = idx * 137.508 * (Math.PI / 180);
         const radius = 220 + idx * 20;
-        pos = {
-          x: anchor.pos.x + Math.cos(angle) * radius,
-          y: anchor.pos.y + Math.sin(angle) * radius,
-        };
+        pos = { x: anchor.pos.x + Math.cos(angle) * radius, y: anchor.pos.y + Math.sin(angle) * radius };
       } else {
         pos = assignSpiralPosition(backendNode.id);
       }
       nodePositionRef.current.set(backendNode.id, pos);
       placeholderNodesRef.current.add(backendNode.id);
 
-      // Depth-based nodeType: root=0 → topic, topic=1 → subtopic, subtopic/detail=2+ → detail
       const parentDepth = expansionDepthRef.current;
       const nodeType: GraphNodeData['nodeType'] =
-        parentDepth === 0 ? 'topic' :
-        parentDepth === 1 ? 'subtopic' : 'detail';
+        parentDepth === 0 ? 'topic' : parentDepth === 1 ? 'subtopic' : 'detail';
 
-      setNodes(prev => {
-        if (prev.some(n => n.id === backendNode.id)) return prev;
-        return [...prev, {
-          id: backendNode.id,
-          type: 'graphNode',
-          position: pos,
-          data: {
-            label: backendNode.label,
-            nodeType,
-            description: backendNode.type,
-            parentId: anchor?.id,
-          },
-        } as GraphLayoutNode];
-      });
-
-      // Debounced full layout — runs after the burst of node.created events settles.
-      // Uses force-directed layout (spring forces along edges pull connected nodes
-      // together, repulsion pushes unrelated ones apart) then resolves overlaps.
-      if (layoutDebounceRef.current) clearTimeout(layoutDebounceRef.current);
-      layoutDebounceRef.current = setTimeout(() => {
-        setNodes(prev => layout(prev as GraphLayoutNode[], edgesRef.current) as Node[]);
-      }, 600);
+      const newNode: GraphLayoutNode = {
+        id: backendNode.id,
+        type: 'graphNode',
+        position: pos,
+        data: { label: backendNode.label, nodeType, description: backendNode.type, parentId: anchor?.id },
+      };
 
       if (anchor) {
+        // Expansion: commit immediately so the user sees progress
+        setNodes(prev => prev.some(n => n.id === backendNode.id) ? prev : [...prev, newNode]);
         const bridgeEdgeId = `e-expand-${anchor.id}-${backendNode.id}`;
         setEdges(prev => prev.some(ex => ex.id === bridgeEdgeId) ? prev : [...prev, {
-          id: bridgeEdgeId,
-          source: anchor.id,
-          target: backendNode.id,
-          label: 'expands',
-          type: 'floating',
+          id: bridgeEdgeId, source: anchor.id, target: backendNode.id,
+          label: 'expands', type: 'floating',
         }]);
+      } else {
+        // Initial load: buffer — nodes appear only after layout is done
+        pendingNodesRef.current.set(backendNode.id, newNode);
       }
+
+      // Debounced commit + layout — fires after the SSE burst settles
+      if (layoutDebounceRef.current) clearTimeout(layoutDebounceRef.current);
+      layoutDebounceRef.current = setTimeout(() => {
+        const isBatchMode = !expansionAnchorRef.current;
+
+        if (isBatchMode && pendingNodesRef.current.size > 0) {
+          const pNodes = [...pendingNodesRef.current.values()];
+          const pEdges = [...pendingEdgesRef.current.values()];
+          pendingNodesRef.current.clear();
+          pendingEdgesRef.current.clear();
+
+          const allEdges = [...edgesRef.current, ...pEdges];
+          const laidOut = layout(
+            [...(nodesRef.current as GraphLayoutNode[]), ...pNodes],
+            allEdges,
+          ) as Node[];
+
+          setNodes(laidOut);
+          setEdges(allEdges);
+          setIsProcessing(false);
+
+          // Double-rAF: first fires after React's commit, second after the browser paints layout
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              reactFlowInstance.fitView({ padding: 0.12, duration: 700 });
+            });
+          });
+        } else {
+          // Expansion: just re-layout existing committed nodes
+          setNodes(prev => layout(prev as GraphLayoutNode[], edgesRef.current) as Node[]);
+        }
+      }, 600);
     });
 
     source.addEventListener('edge.created', (e: MessageEvent) => {
@@ -438,43 +453,52 @@ function KnowledgeGraphCanvasInner() {
       const backendEdge = envelope.payload.edge;
       const anchor = expansionAnchorRef.current;
 
-      const sourceInGraph = nodesRef.current.some(n => n.id === backendEdge.source);
-      const targetInGraph = nodesRef.current.some(n => n.id === backendEdge.target);
+      const sourceInGraph =
+        nodesRef.current.some(n => n.id === backendEdge.source) ||
+        pendingNodesRef.current.has(backendEdge.source);
+      const targetInGraph =
+        nodesRef.current.some(n => n.id === backendEdge.target) ||
+        pendingNodesRef.current.has(backendEdge.target);
 
-      // Skip edges where neither node exists in the graph — they're invisible and can't
-      // create hierarchy. Also skip when an anchor is active and this edge routes through
-      // a node other than the anchor (prevents off-target nodes like the root company
-      // from "claiming" children that belong to the clicked sub-node).
       if (!sourceInGraph && !targetInGraph) return;
       if (anchor && sourceInGraph && backendEdge.source !== anchor.id) return;
 
       // Reposition a placeholder target now that its real source is known
       const newPos = assignChildPosition(backendEdge.source, backendEdge.target);
       if (newPos) {
-        setNodes(prev => prev.map(n => n.id === backendEdge.target ? { ...n, position: newPos } : n));
+        if (anchor) {
+          setNodes(prev => prev.map(n => n.id === backendEdge.target ? { ...n, position: newPos } : n));
+        } else {
+          const pending = pendingNodesRef.current.get(backendEdge.target);
+          if (pending) pendingNodesRef.current.set(backendEdge.target, { ...pending, position: newPos });
+        }
       }
 
-      // When anchor is active and source doesn't exist in the graph (e.g. demo node IDs
-      // differ from backend-normalised IDs), route the edge from the anchor so the
-      // predicate label is visible on the correct connector.
       const edgeSource = sourceInGraph ? backendEdge.source : (anchor?.id ?? backendEdge.source);
       const edgeId = `${edgeSource}:${backendEdge.predicate}:${backendEdge.target}`;
 
-      setEdges(prev => {
-        if (prev.some(edge => edge.id === edgeId)) return prev;
-        // Replace the generic "expands" bridge edge with this semantically labelled one
-        const filtered = edgeSource === anchor?.id
-          ? prev.filter(ex => ex.id !== `e-expand-${anchor.id}-${backendEdge.target}`)
-          : prev;
-        return [...filtered, {
-          id: edgeId,
-          source: edgeSource,
-          target: backendEdge.target,
-          label: backendEdge.predicate,
-          type: 'floating',
-          data: { confidence: backendEdge.confidence },
-        }];
-      });
+      if (anchor) {
+        setEdges(prev => {
+          if (prev.some(edge => edge.id === edgeId)) return prev;
+          const filtered = edgeSource === anchor.id
+            ? prev.filter(ex => ex.id !== `e-expand-${anchor.id}-${backendEdge.target}`)
+            : prev;
+          return [...filtered, {
+            id: edgeId, source: edgeSource, target: backendEdge.target,
+            label: backendEdge.predicate, type: 'floating',
+            data: { confidence: backendEdge.confidence },
+          }];
+        });
+      } else {
+        // Buffer edge for initial load — committed alongside nodes after layout
+        if (!pendingEdgesRef.current.has(edgeId)) {
+          pendingEdgesRef.current.set(edgeId, {
+            id: edgeId, source: edgeSource, target: backendEdge.target,
+            label: backendEdge.predicate, type: 'floating',
+            data: { confidence: backendEdge.confidence },
+          });
+        }
+      }
     });
 
     const addReasoning = (e: MessageEvent) => {
@@ -497,6 +521,8 @@ function KnowledgeGraphCanvasInner() {
     return () => {
       eventSourceRef.current?.close();
       if (layoutDebounceRef.current) clearTimeout(layoutDebounceRef.current);
+      pendingNodesRef.current.clear();
+      pendingEdgesRef.current.clear();
     };
   }, []);
 
@@ -504,6 +530,7 @@ function KnowledgeGraphCanvasInner() {
 
   const handleDataSubmit = useCallback(async (text: string, documentName = 'input.txt') => {
     setIsDissolving(true);
+    setIsProcessing(true);
     expansionAnchorRef.current = null;
     expansionChildIdxRef.current = 0;
     eventSourceRef.current?.close();
@@ -511,6 +538,8 @@ function KnowledgeGraphCanvasInner() {
     nodePositionRef.current.clear();
     childCountRef.current.clear();
     placeholderNodesRef.current.clear();
+    pendingNodesRef.current.clear();
+    pendingEdgesRef.current.clear();
     setNodes([]);
     setEdges([]);
     setReasoningSteps([]);
@@ -531,6 +560,7 @@ function KnowledgeGraphCanvasInner() {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Backend extraction failed';
       console.error(message, error);
+      setIsProcessing(false);
       setReasoningSteps(prev => [...prev, {
         id: `error-${Date.now()}`,
         text: message,
@@ -962,6 +992,9 @@ function KnowledgeGraphCanvasInner() {
       {(isEmpty || isDissolving) && (
         <AnimatedBlob onDataSubmit={handleDataSubmit} isDissolving={isDissolving} />
       )}
+
+      {/* Loading blob — shown from submit until first node arrives */}
+      <LoadingBlob isVisible={isProcessing} />
 
       {/* Node input box */}
       <AnimatePresence>
