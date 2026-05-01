@@ -2,8 +2,9 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useState, useCallback, useRef } from 'react';
 import type { AIReasoningStep } from './types';
 import { checkMcpHealth, mcpReadAll, MCP_CONNECTOR_URL } from '@/lib/api';
+import { extractFileText } from '@/lib/pdf';
 
-const READABLE_EXTENSIONS = /\.(txt|md|csv|json)$/i;
+const READABLE_EXTENSIONS = /\.(txt|md|csv|json|pdf)$/i;
 
 interface AnimatedBlobProps {
   onDataSubmit: (text: string, documentName?: string) => void | Promise<void>;
@@ -50,7 +51,7 @@ export function AnimatedBlob({ onDataSubmit, isDissolving }: AnimatedBlobProps) 
     if (accepted.length === 0) return;
     const contents = await Promise.all(accepted.map(async file => ({
       name: file.name,
-      text: await file.text(),
+      text: await extractFileText(file),
     })));
     await onDataSubmit(
       contents.map(file => `--- ${file.name} ---\n${file.text}`).join('\n\n'),
@@ -161,7 +162,7 @@ export function AnimatedBlob({ onDataSubmit, isDissolving }: AnimatedBlobProps) 
                     className="text-xs mt-1 opacity-80"
                     style={{ color: 'white', textShadow: '0 1px 3px rgba(0,0,0,0.25)' }}
                   >
-                    .txt · .md · .csv · .json
+                    .pdf · .txt · .md · .csv · .json
                   </p>
                 </motion.div>
               </div>
@@ -172,7 +173,7 @@ export function AnimatedBlob({ onDataSubmit, isDissolving }: AnimatedBlobProps) 
             ref={fileInputRef}
             type="file"
             multiple
-            accept=".txt,.md,.csv,.json,text/plain,text/markdown,text/csv,application/json"
+            accept=".pdf,.txt,.md,.csv,.json,application/pdf,text/plain,text/markdown,text/csv,application/json"
             className="hidden"
             onChange={(e) => {
               const files = Array.from(e.target.files ?? []);

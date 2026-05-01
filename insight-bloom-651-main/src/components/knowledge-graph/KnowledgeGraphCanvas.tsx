@@ -26,6 +26,7 @@ import { FloatingEdge } from './FloatingEdge';
 import type { AIReasoningStep, DataSource } from './types';
 import type { NodeRelationship } from './NodeInputBox';
 import { createRun, extractFromText, openRunStream, expandSubtree as apiExpandSubtree, queryGraph as apiQueryGraph, categorizeNodes, type ExpandContext, type NodeCategory } from '@/lib/api';
+import { extractFileText } from '@/lib/pdf';
 import { QueryBox } from './QueryBox';
 
 type GraphLayoutNode = Node<GraphNodeData>;
@@ -1334,7 +1335,7 @@ function KnowledgeGraphCanvasInner() {
       }]);
 
       try {
-        const text = await file.text();
+        const text = await extractFileText(file);
         await extractFromText(runId, text, file.name);
       } catch (error) {
         const message = error instanceof Error ? error.message : `Failed to extract ${file.name}`;
