@@ -137,6 +137,10 @@ export interface ExpandSubtreeInput {
   nodes: SubtreeNode[];
   edges: SubtreeEdge[];
   question?: string;
+  parentNode?: SubtreeNode;
+  siblings?: string[];
+  graphDepth?: number;
+  globalBranches?: string[];
 }
 
 export interface ExpandSubtreeResult {
@@ -147,30 +151,37 @@ export interface ExpandSubtreeResult {
 }
 
 export async function expandSubtree(input: ExpandSubtreeInput): Promise<ExpandSubtreeResult> {
-  const { rootNode, nodes, edges, question } = input;
+  const { rootNode, nodes, edges, question, parentNode, siblings = [], graphDepth = 0, globalBranches = [] } = input;
 
-  // Build a compact text summary of the subtree
-  const nodeList = nodes.map(n => `${n.label} (${n.type})`).join(', ');
   const edgeList = edges.map(e => `${e.subjectLabel} --[${e.predicate}]--> ${e.objectLabel}`).join('\n');
 
-  // Step 1: Ask the AI to generate focused web search queries for this subtree
-  const queryGenPrompt = `You are a research planner for a knowledge graph tool.
+  // Build lineage path for context
+  const lineagePath = parentNode
+    ? `${parentNode.label} → ${rootNode.label}`
+    : rootNode.label;
 
-The user clicked on a branch of their knowledge graph and wants it expanded with real-world information from the web.
+  // Depth-appropriate instruction for query generation
+  const depthLabel = graphDepth === 0 ? 'root entity' : graphDepth === 1 ? 'Level 1 pillar' : graphDepth === 2 ? 'Level 2 subdivision' : `Level ${graphDepth} detail`;
 
-ROOT NODE: ${rootNode.label} (${rootNode.type})
+  // Step 1: Ask the AI to generate focused web search queries
+  const queryGenPrompt = `You are a research planner for a structured knowledge graph.
 
-ALL NODES IN THIS BRANCH:
-${nodeList || rootNode.label}
+The user clicked on a node to expand it. Search for information that fits the node's level of abstraction.
 
-EXISTING RELATIONSHIPS IN THIS BRANCH:
-${edgeList || 'None yet.'}
-
+TARGET NODE: "${rootNode.label}" (${rootNode.type}) — ${depthLabel}
+LINEAGE: ${lineagePath}
+${parentNode ? `PARENT: "${parentNode.label}"` : ''}
 ${question ? `USER QUESTION: ${question}` : ''}
 
-Generate 2–3 specific, distinct web search queries that will find useful new facts, relationships, and context to expand this branch.
-Queries should be concrete and targeted (include entity names, avoid generic phrases).
+ABSTRACTION LEVEL GUIDANCE:
+${graphDepth <= 1
+    ? `Level ${graphDepth}: search for high-level CATEGORIES and PILLARS of "${rootNode.label}" — not specific statistics or names yet.`
+    : graphDepth === 2
+      ? `Level 2: search for named SUB-DIVISIONS and key entities within "${rootNode.label}".`
+      : `Level ${graphDepth}: search for SPECIFIC FACTS, statistics, names, and data points about "${rootNode.label}" under "${parentNode?.label ?? 'its parent'}".`
+  }
 
+Generate 2–3 specific, distinct web search queries that target this abstraction level.
 Output JSON: { "queries": [string, string, ...] }`;
 
   const queryRaw = await callOpenAI(
@@ -209,45 +220,70 @@ Output JSON: { "queries": [string, string, ...] }`;
     throw new Error('No web search results returned. Configure TAVILY_API_KEY or BRAVE_SEARCH_API_KEY in .env');
   }
 
-  // Step 3: AI synthesizes search results into new SPO triples
-  const synthesisPrompt = `You are a knowledge graph researcher. Use the web search results below to expand a knowledge graph node.
+  // Step 3: AI synthesizes search results into new SPO triples using the 4-rule protocol
+  const allExistingLabels = [rootNode.label, ...nodes.map(n => n.label)];
 
-ACTIVE TARGET NODE (the node the user clicked — expand THIS node specifically):
-"${rootNode.label}" (type: ${rootNode.type})
+  const depthRule = graphDepth <= 1
+    ? `RULE 1 — BREADTH-FIRST ABSTRACTION (Level ${graphDepth}):
+You MUST generate broad, abstract CATEGORY nodes — NOT leaf-level facts.
+GOOD labels at this level: "Finances", "Product Lines", "Corporate Leadership", "Market Competition"
+BAD labels at this level: "$4 trillion market cap", "Tim Cook is 62", specific dates or raw statistics
+Only abstract organisational categories, pillars, and high-level themes are allowed here.`
+    : graphDepth === 2
+      ? `RULE 1 — BREADTH-FIRST ABSTRACTION (Level 2):
+Generate named SUB-DIVISIONS and key entities within "${rootNode.label}". Named entities (people, products, markets) are OK.
+Avoid raw statistics and highly specific data points — save those for deeper levels.`
+      : `RULE 1 — SPECIFICITY UNLOCKED (Level ${graphDepth}+):
+You may now include specific facts, statistics, exact names, and data points.
+GOOD: "Revenue: $82.3B (Q3 2024)", "Led Vision Pro launch (2023)", "Holds 1M+ Apple shares"
+BAD: still forbidden: snake_case ("sales_decline"), generic categories ("revenue_figure").
+Max 60 characters per label.`;
 
-EXISTING NODES (strict deduplication — reuse exact labels for these, do NOT create duplicates):
-${[rootNode.label, ...nodes.map(n => n.label)].join('\n')}
+  const synthesisPrompt = `You are a structured Knowledge Graph Architect. Apply ALL four rules below strictly.
+
+════════════════════════════════════════
+TARGET NODE: "${rootNode.label}" (${rootNode.type})
+LINEAGE PATH: ${lineagePath}
+GRAPH DEPTH: Level ${graphDepth}
+${parentNode ? `PARENT: "${parentNode.label}"` : ''}
+════════════════════════════════════════
+
+SIBLINGS ALREADY ATTACHED TO PARENT (do NOT duplicate or overlap):
+${siblings.length > 0 ? siblings.map(s => `• ${s}`).join('\n') : '• None yet'}
+
+GLOBAL BRANCHES ALREADY IN GRAPH (do NOT duplicate):
+${globalBranches.length > 0 ? globalBranches.map(b => `• ${b}`).join('\n') : '• None yet'}
+
+ALL EXISTING NODE LABELS (strict deduplication — reuse exact strings for these):
+${allExistingLabels.join(', ')}
 
 EXISTING RELATIONSHIPS:
 ${edgeList || 'None yet.'}
 
-${question ? `USER QUESTION: ${question}` : `GOAL: Find specific facts, sub-topics, and connections directly about "${rootNode.label}".`}
+${question ? `USER QUESTION: ${question}` : `GOAL: Generate exactly 5 logical sub-nodes of "${rootNode.label}" following the protocol.`}
 
 WEB SEARCH RESULTS:
 ${allWebContext.join('\n\n')}
 
-Extract new Subject-Predicate-Object relationships. ALL rules below are mandatory:
+════ MANDATORY RULES ════
 
-HIERARCHY (most important rule):
-- EVERY new relationship MUST have "${rootNode.label}" as either the subject or the object.
-- Do NOT create triples between two third-party entities that don't directly involve "${rootNode.label}".
-- Example: if expanding "Tim Cook", write "Tim Cook --earned--> Annual compensation: $98M", NOT "Apple --has_CEO--> Tim Cook".
+${depthRule}
 
-LABEL QUALITY:
-- Labels must be specific, human-readable, and descriptive — never snake_case or generic category words.
-- BAD: "sales_decline", "revenue_figure", "market_position"
-- GOOD: "Revenue: $82.3B (Q3 2024)", "Led Vision Pro launch (2023)", "Holds 1M+ Apple shares"
-- For data points, write the actual fact as the label (max 60 chars).
+RULE 2 — ANTI-DUPLICATION:
+• Do NOT create any node whose label overlaps (case-insensitive) with any sibling or global branch listed above.
+• If a concept already exists in the graph, reference it via an edge rather than creating a new node.
 
-DEDUPLICATION:
-- If subject or object semantically matches any name in the EXISTING NODES list (case-insensitive), use the EXACT same label string from that list.
+RULE 3 — HIERARCHICAL CONTEXT:
+• Every new node must be a direct, logical sub-category or attribute of "${rootNode.label}" specifically.
+• Stay within the lineage: ${lineagePath}.
+• Do NOT revert to generic facts about the parent entity "${parentNode?.label ?? 'root'}".
+• Example: expanding "Corporate Leadership" under "Apple Inc" → generate "Board of Directors", "Executive Team", "Leadership History" — NOT "Apple Revenue" or "iPhone Sales".
 
-OTHER:
-- Predicate: short verb phrase, 1–4 words.
-- subjectType/objectType: Company, Person, Market, Product, Location, Concept, Event, or Entity.
-- confidence: 0–1 based on how explicitly the source states this.
+RULE 4 — DIRECT CONNECTION:
+• Every new relationship MUST have "${rootNode.label}" as either subject or object.
+• Do NOT generate triples between two third-party entities.
 
-Also write a 2–4 sentence summary of the most important new findings about "${rootNode.label}".
+Also write a 2–3 sentence summary of the most important new findings specifically about "${rootNode.label}".
 
 Output JSON: {
   "summary": string,

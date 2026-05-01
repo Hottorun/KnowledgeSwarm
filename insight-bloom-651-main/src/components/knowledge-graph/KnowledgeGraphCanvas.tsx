@@ -24,7 +24,7 @@ import { EdgeButton } from './EdgeButton';
 import { FloatingEdge } from './FloatingEdge';
 import type { AIReasoningStep, DataSource } from './types';
 import type { NodeRelationship } from './NodeInputBox';
-import { createRun, extractFromText, openRunStream, expandSubtree as apiExpandSubtree } from '@/lib/api';
+import { createRun, extractFromText, openRunStream, expandSubtree as apiExpandSubtree, type ExpandContext } from '@/lib/api';
 
 type GraphLayoutNode = Node<GraphNodeData>;
 
@@ -735,12 +735,55 @@ function KnowledgeGraphCanvasInner() {
       objectLabel: getLabel(e.target),
     }));
 
+    // ── Resolve parent node (direct parent of the clicked node) ────────────────
+    const parentEdge = edges.find(e => e.target === selectedNode.id && ancestorIds.has(e.source));
+    const parentNodeInGraph = parentEdge ? nodes.find(n => n.id === parentEdge.source) : null;
+    const parentNodePayload = parentNodeInGraph
+      ? {
+          id: parentNodeInGraph.id,
+          label: (parentNodeInGraph.data as GraphNodeData).label,
+          type: (parentNodeInGraph.data as GraphNodeData).description ?? 'Entity',
+        }
+      : undefined;
+
+    // ── Siblings: other children of the same parent (excludes selected node) ───
+    const siblingLabels = parentEdge
+      ? edges
+          .filter(e => e.source === parentEdge.source && e.target !== selectedNode.id)
+          .map(e => {
+            const sibling = nodes.find(n => n.id === e.target);
+            return sibling ? (sibling.data as GraphNodeData).label : null;
+          })
+          .filter((l): l is string => l !== null)
+      : [];
+
+    // ── Global branches: Level-1 nodes (direct children of the graph root) ─────
+    const rootNodeInGraph = nodes.find(n => (n.data as GraphNodeData).nodeType === 'root');
+    const globalBranches = rootNodeInGraph
+      ? edges
+          .filter(e => e.source === rootNodeInGraph.id)
+          .map(e => {
+            const branch = nodes.find(n => n.id === e.target);
+            return branch ? (branch.data as GraphNodeData).label : null;
+          })
+          .filter((l): l is string => l !== null)
+      : [];
+
+    const graphDepth = expansionDepthRef.current;
+
+    const expandCtx: ExpandContext = {
+      parentNode: parentNodePayload,
+      siblings: siblingLabels,
+      graphDepth,
+      globalBranches,
+    };
+
     const label = nodeData.label;
     const pathContext = breadcrumb.length > 1 ? ` (context path: ${contextPath})` : '';
     const defaultQuestions: Record<string, string> = {
-      expand:   `What are the key sub-topics, components, and specific facts about "${label}"${pathContext}? Include concrete names, figures, and examples relevant specifically to this context.`,
-      research: `Do deep research on "${label}"${pathContext}. Find: recent statistics, key players, market size or scale, major trends, challenges, and specific recent developments. Only include information relevant to this specific context, not generic results.`,
-      connect:  `Map the relationship network of "${label}"${pathContext}. What companies, people, markets, technologies, regulations, and events is it directly connected to within this context? Focus on dependencies and influences.`,
+      expand:   `Expand the node "${label}"${pathContext} with 5 logical sub-categories following breadth-first abstraction.`,
+      research: `Do deep research on "${label}"${pathContext}. Find specific facts, statistics, key people, and recent developments.`,
+      connect:  `Map the relationship network of "${label}"${pathContext}. What entities, markets, and concepts is it directly connected to?`,
     };
     const question = prompt
       ? `${prompt} — specifically about "${label}"${pathContext}`
@@ -748,13 +791,13 @@ function KnowledgeGraphCanvasInner() {
 
     setReasoningSteps(prev => [...prev, {
       id: `r-${Date.now()}`,
-      text: `Expanding "${nodeData.label}" — searching for "${question}"…`,
+      text: `Expanding "${nodeData.label}" (Level ${graphDepth})${parentNodePayload ? ` under "${parentNodePayload.label}"` : ''}…`,
       timestamp: new Date(),
       type: 'expansion',
     }]);
 
     try {
-      const result = await apiExpandSubtree(runId, rootNode, contextNodes, contextEdges, question);
+      const result = await apiExpandSubtree(runId, rootNode, contextNodes, contextEdges, question, expandCtx);
       setReasoningSteps(prev => [...prev, {
         id: `r-${Date.now()}-done`,
         text: `"${nodeData.label}" expanded: ${result.newTriplesPersisted} new relationship(s). ${result.summary}`,

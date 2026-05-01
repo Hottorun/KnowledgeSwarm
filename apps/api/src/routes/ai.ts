@@ -41,6 +41,14 @@ const expandSchema = z.object({
     objectLabel: z.string(),
   })).optional().default([]),
   question: z.string().optional(),
+  parentNode: z.object({
+    id: z.string(),
+    label: z.string(),
+    type: z.string().optional(),
+  }).optional(),
+  siblings: z.array(z.string()).optional().default([]),
+  graphDepth: z.number().optional().default(0),
+  globalBranches: z.array(z.string()).optional().default([]),
 });
 
 router.get('/status', (_req: Request, res: Response) => {
@@ -106,7 +114,7 @@ router.post('/runs/:runId/extract', async (req: Request, res: Response) => {
 router.post('/runs/:runId/expand-subtree', async (req: Request, res: Response) => {
   try {
     const runId = String(req.params.runId);
-    const { rootNode, nodes, edges, question } = expandSchema.parse(req.body);
+    const { rootNode, nodes, edges, question, parentNode, siblings, graphDepth, globalBranches } = expandSchema.parse(req.body);
     const rawTriples: RawExtractedTriple[] = [];
 
     let summary: string;
@@ -117,6 +125,10 @@ router.post('/runs/:runId/expand-subtree', async (req: Request, res: Response) =
         nodes: nodes.map(node => ({ id: node.id, label: node.label, type: node.type || 'Entity' })),
         edges,
         question,
+        parentNode: parentNode ? { id: parentNode.id, label: parentNode.label, type: parentNode.type || 'Entity' } : undefined,
+        siblings,
+        graphDepth,
+        globalBranches,
       });
       rawTriples.push(...result.newTriples);
       summary = result.summary;

@@ -74,17 +74,25 @@ export interface SubtreeEdge {
   objectLabel: string;
 }
 
+export interface ExpandContext {
+  parentNode?: SubtreeNode;
+  siblings?: string[];
+  graphDepth?: number;
+  globalBranches?: string[];
+}
+
 export async function expandSubtree(
   runId: string,
   rootNode: SubtreeNode,
   nodes: SubtreeNode[],
   edges: SubtreeEdge[],
   question?: string,
+  ctx?: ExpandContext,
 ): Promise<{ summary: string; newTriplesPersisted: number }> {
   const res = await fetch(`${API_BASE}/ai/runs/${runId}/expand-subtree`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ rootNode, nodes, edges, question }),
+    body: JSON.stringify({ rootNode, nodes, edges, question, ...ctx }),
   });
   if (!res.ok) {
     const data = await res.json() as { error?: string };
