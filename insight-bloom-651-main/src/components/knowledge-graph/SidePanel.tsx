@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import type { AIReasoningStep } from './types';
 import type { Node, Edge } from '@xyflow/react';
@@ -223,6 +223,13 @@ interface SidePanelProps {
 
 export function SidePanel({ side, isOpen, onClose, nodes = [], edges = [], onNodeFocus, onFocusMultiple, categories = [], reasoningSteps = [] }: SidePanelProps) {
   const isLeft = side === 'left';
+  const reasoningBottomRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!isLeft && reasoningSteps.length > 0) {
+      reasoningBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [isLeft, reasoningSteps.length]);
 
   // Build TOC tree by traversing edges from root nodes
   const tocRoots = (() => {
@@ -344,6 +351,7 @@ export function SidePanel({ side, isOpen, onClose, nodes = [], edges = [], onNod
                       </p>
                     </motion.div>
                   ))}
+                  <div ref={reasoningBottomRef} />
                 </div>
               )
             )}
