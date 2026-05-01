@@ -332,6 +332,7 @@ function KnowledgeGraphCanvasInner() {
   const expansionDepthRef = useRef<number>(0);
   const layoutDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const edgesRef = useRef<Edge[]>([]);
+  const isSwarmExtraction = useRef(false);
   // Nodes the user has manually dragged — pinned so re-layouts after expansion
   // don't snap them back to their physics-determined position.
   const userMovedRef = useRef<Set<string>>(new Set());
@@ -518,6 +519,7 @@ function KnowledgeGraphCanvasInner() {
 
       // Debounced commit + layout — fires after the SSE burst settles
       if (layoutDebounceRef.current) clearTimeout(layoutDebounceRef.current);
+      const debounceMs = 200; // Shorter for faster incremental rendering
       layoutDebounceRef.current = setTimeout(() => {
         const isBatchMode = !expansionAnchorRef.current;
 
@@ -617,15 +619,23 @@ function KnowledgeGraphCanvasInner() {
     });
 
     const addReasoning = (e: MessageEvent) => {
-      const envelope = JSON.parse(e.data) as SseEnvelope<{ agentName?: string; eventType?: string; message?: string; status?: string }>;
-      const payload = envelope.payload;
-      const eventType = payload.eventType ?? payload.status ?? envelope.type;
-      setReasoningSteps(prev => [...prev, {
-        id: `r-${Date.now()}-${prev.length}`,
-        text: payload.message ?? `[${payload.agentName ?? 'System'}] ${eventType}`,
-        timestamp: new Date(envelope.timestamp || Date.now()),
-        type: eventType.includes('expand') ? 'expansion' : eventType.includes('connect') ? 'connection' : 'analysis',
-      }]);
+      try {
+        const envelope = JSON.parse(e.data) as SseEnvelope<{ agentName?: string; eventType?: string; message?: string; status?: string }>;
+        const payload = envelope.payload;
+        const eventType = payload.eventType ?? payload.status ?? envelope.type;
+        const agentName = payload.agentName ?? '';
+        if (agentName.includes('Agent') || agentName.includes('Supervisor') || agentName === 'MetaAgent') {
+          isSwarmExtraction.current = true;
+        }
+        setReasoningSteps(prev => [...prev, {
+          id: `r-${Date.now()}-${prev.length}`,
+          text: payload.message ?? `[${agentName || 'System'}] ${eventType}`,
+          timestamp: new Date(envelope.timestamp || Date.now()),
+          type: eventType.includes('expand') ? 'expansion' : eventType.includes('connect') ? 'connection' : 'analysis',
+        }]);
+      } catch (err) {
+        console.warn('[SSE] Failed to parse event:', err);
+      }
     };
 
     source.addEventListener('agent.step', addReasoning);
@@ -667,6 +677,7 @@ function KnowledgeGraphCanvasInner() {
     setNodes([]);
     setEdges([]);
     setReasoningSteps([]);
+    isSwarmExtraction.current = false;
 
     setDataSources(prev => [...prev, {
       id: `ds-${Date.now()}`,

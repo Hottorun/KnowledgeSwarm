@@ -1,7 +1,7 @@
 import { motion, AnimatePresence } from 'framer-motion';
 import { useState, useCallback, useRef } from 'react';
 import type { AIReasoningStep } from './types';
-import { checkMcpHealth, mcpListDirectory, mcpReadFile, MCP_CONNECTOR_URL } from '@/lib/api';
+import { checkMcpHealth, mcpReadAll, MCP_CONNECTOR_URL } from '@/lib/api';
 
 const READABLE_EXTENSIONS = /\.(txt|md|csv|json)$/i;
 
@@ -41,7 +41,7 @@ type McpStatus = 'idle' | 'checking' | 'reading' | 'error';
 export function AnimatedBlob({ onDataSubmit, isDissolving }: AnimatedBlobProps) {
   const [isDragOver, setIsDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [mcpPath, setMcpPath] = useState('');
+  const [mcpServerUrl, setMcpServerUrl] = useState('');
   const [mcpStatus, setMcpStatus] = useState<McpStatus>('idle');
   const [mcpError, setMcpError] = useState('');
 
@@ -73,51 +73,37 @@ export function AnimatedBlob({ onDataSubmit, isDissolving }: AnimatedBlobProps) 
   }, [handleFiles, onDataSubmit]);
 
   const handleMcpConnect = useCallback(async () => {
-    const path = mcpPath.trim();
-    if (!path) return;
+    const serverUrl = mcpServerUrl.trim();
+    if (!serverUrl) return;
     setMcpStatus('checking');
     setMcpError('');
 
     try {
-      const healthy = await checkMcpHealth();
-      if (!healthy) {
+      const healthCheck = await checkMcpHealth(serverUrl);
+      if (!healthCheck.ok) {
         setMcpStatus('error');
-        setMcpError('MCP bridge not reachable. Start the connector first.');
+        setMcpError(healthCheck.error || 'MCP bridge not reachable. Make sure the URL is correct and the server is running.');
         return;
       }
 
       setMcpStatus('reading');
-      const listing = await mcpListDirectory(path);
 
-      // Parse file paths from the listing text
-      const filePaths = listing
-        .split('\n')
-        .map(line => line.trim())
-        .filter(line => READABLE_EXTENSIONS.test(line))
-        .map(line => {
-          // Some MCP bridges return just filenames, others return full paths
-          return line.startsWith('/') ? line : `${path.replace(/\/$/, '')}/${line}`;
-        });
+      const text = await mcpReadAll(serverUrl);
 
-      if (filePaths.length === 0) {
+      if (!text.trim()) {
         setMcpStatus('error');
         setMcpError('No readable files found (.txt, .md, .csv, .json).');
         return;
       }
 
-      const contents = await Promise.all(
-        filePaths.map(async fp => ({ name: fp.split('/').pop() ?? fp, text: await mcpReadFile(fp) }))
-      );
-
-      await onDataSubmit(
-        contents.map(f => `--- ${f.name} ---\n${f.text}`).join('\n\n'),
-        contents.map(f => f.name).join(', '),
-      );
+      await onDataSubmit(text, 'MCP files');
     } catch (err) {
       setMcpStatus('error');
-      setMcpError(err instanceof Error ? err.message : 'Connection failed.');
+      const errorMsg = err instanceof Error ? err.message : 'Connection failed.';
+      setMcpError(errorMsg);
+      console.error('[MCP] Connection error:', err);
     }
-  }, [mcpPath, onDataSubmit]);
+  }, [mcpServerUrl, onDataSubmit]);
 
   if (isDissolving) {
     return (
@@ -210,14 +196,14 @@ export function AnimatedBlob({ onDataSubmit, isDissolving }: AnimatedBlobProps) 
             <div className="flex-1 h-px" style={{ background: 'var(--border)' }} />
           </div>
 
-          {/* path input + connect button */}
+          {/* MCP server URL input + connect button */}
           <div className="flex gap-2 w-full">
             <input
-              type="text"
-              value={mcpPath}
-              onChange={e => setMcpPath(e.target.value)}
+              type="url"
+              value={mcpServerUrl}
+              onChange={e => setMcpServerUrl(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') void handleMcpConnect(); }}
-              placeholder="/path/to/folder"
+              placeholder="http://localhost:8790"
               className="flex-1 rounded-lg px-3 py-2 text-xs outline-none"
               style={{
                 background: 'var(--secondary)',
@@ -228,13 +214,13 @@ export function AnimatedBlob({ onDataSubmit, isDissolving }: AnimatedBlobProps) 
             />
             <button
               onClick={() => void handleMcpConnect()}
-              disabled={!mcpPath.trim() || mcpStatus === 'checking' || mcpStatus === 'reading'}
+              disabled={!mcpServerUrl.trim() || mcpStatus === 'checking' || mcpStatus === 'reading'}
               className="rounded-lg px-3 py-2 text-xs font-semibold transition-colors"
               style={{
                 background: 'var(--primary)',
                 color: 'var(--primary-foreground)',
-                opacity: (!mcpPath.trim() || mcpStatus === 'checking' || mcpStatus === 'reading') ? 0.5 : 1,
-                cursor: (!mcpPath.trim() || mcpStatus === 'checking' || mcpStatus === 'reading') ? 'not-allowed' : 'pointer',
+                opacity: (!mcpServerUrl.trim() || mcpStatus === 'checking' || mcpStatus === 'reading') ? 0.5 : 1,
+                cursor: (!mcpServerUrl.trim() || mcpStatus === 'checking' || mcpStatus === 'reading') ? 'not-allowed' : 'pointer',
               }}
             >
               {mcpStatus === 'checking' ? 'Checking…' : mcpStatus === 'reading' ? 'Reading…' : 'Connect'}

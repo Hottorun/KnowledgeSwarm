@@ -85,33 +85,49 @@ export async function extractFromFile(runId: string, file: File): Promise<void> 
   return extractFromText(runId, text, file.name);
 }
 
-export async function checkMcpHealth(): Promise<boolean> {
+export async function checkMcpHealth(mcpServerUrl?: string): Promise<{ ok: boolean; error?: string; mcpServerUrl?: string }> {
   try {
-    const res = await fetch(`${API_BASE}/mcp/health`);
-    if (!res.ok) return false;
-    const data = await res.json() as { ok: boolean };
-    return data.ok === true;
+    const res = await fetch(`${API_BASE}/mcp/health`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mcpServerUrl }),
+    });
+    const data = await res.json() as { ok: boolean; error?: string; mcpServerUrl?: string };
+    return { ok: data.ok === true, error: data.error, mcpServerUrl: data.mcpServerUrl };
   } catch {
-    return false;
+    return { ok: false, error: 'Failed to reach backend API. Make sure the backend is running.' };
   }
 }
 
-export async function mcpListDirectory(path: string): Promise<string> {
+// Test MCP server directly from frontend (bypasses backend)
+export async function checkMcpHealthDirect(mcpServerUrl: string): Promise<{ ok: boolean; error?: string }> {
+  try {
+    let response = await fetch(`${mcpServerUrl}/health`);
+    if (!response.ok) {
+      response = await fetch(`${mcpServerUrl}/tools/list`);
+    }
+    return { ok: response.ok, error: response.ok ? undefined : `HTTP ${response.status}` };
+  } catch {
+    return { ok: false, error: 'Cannot reach MCP server. Make sure the URL is correct and CORS is enabled.' };
+  }
+}
+
+export async function mcpListDirectory(path: string, mcpServerUrl?: string): Promise<string> {
   const res = await fetch(`${API_BASE}/mcp/list-directory`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path }),
+    body: JSON.stringify({ path, mcpServerUrl }),
   });
   if (!res.ok) throw new Error('Failed to list MCP directory');
   const data = await res.json() as { content?: Array<{ text: string }> };
   return data.content?.map(c => c.text).join('\n') ?? '';
 }
 
-export async function mcpReadFile(path: string): Promise<string> {
+export async function mcpReadFile(path: string, mcpServerUrl?: string): Promise<string> {
   const res = await fetch(`${API_BASE}/mcp/read-file`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path }),
+    body: JSON.stringify({ path, mcpServerUrl }),
   });
   if (!res.ok) throw new Error(`Failed to read file: ${path}`);
   const data = await res.json() as { content?: Array<{ text: string }> };
@@ -119,6 +135,24 @@ export async function mcpReadFile(path: string): Promise<string> {
 }
 
 export const MCP_CONNECTOR_URL = `${API_BASE}/downloads/knowledge-swarm-connector.zip`;
+
+interface McpReadAllResponse {
+  content?: Array<{ text: string }>;
+}
+
+export async function mcpReadAll(mcpServerUrl?: string): Promise<string> {
+  const res = await fetch(`${API_BASE}/mcp/read-all`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mcpServerUrl }),
+  });
+  if (!res.ok) {
+    const errorData = await res.json() as { error?: string };
+    throw new Error(errorData.error ?? 'Failed to read files from MCP server');
+  }
+  const data = await res.json() as McpReadAllResponse;
+  return data.content?.map(c => c.text).join('\n\n') ?? '';
+}
 
 export interface SubtreeNode {
   id: string;
