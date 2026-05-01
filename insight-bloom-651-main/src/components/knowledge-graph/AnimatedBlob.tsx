@@ -41,22 +41,30 @@ type McpStatus = 'idle' | 'checking' | 'reading' | 'error';
 
 export function AnimatedBlob({ onDataSubmit, isDissolving }: AnimatedBlobProps) {
   const [isDragOver, setIsDragOver] = useState(false);
+  const [fileError, setFileError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [mcpServerUrl, setMcpServerUrl] = useState('');
   const [mcpStatus, setMcpStatus] = useState<McpStatus>('idle');
   const [mcpError, setMcpError] = useState('');
 
   const handleFiles = useCallback(async (files: File[]) => {
+    setFileError(null);
     const accepted = files.filter(f => READABLE_EXTENSIONS.test(f.name));
     if (accepted.length === 0) return;
-    const contents = await Promise.all(accepted.map(async file => ({
-      name: file.name,
-      text: await extractFileText(file),
-    })));
-    await onDataSubmit(
-      contents.map(file => `--- ${file.name} ---\n${file.text}`).join('\n\n'),
-      contents.map(file => file.name).join(', '),
-    );
+    try {
+      const contents = await Promise.all(accepted.map(async file => ({
+        name: file.name,
+        text: await extractFileText(file),
+      })));
+      await onDataSubmit(
+        contents.map(file => `--- ${file.name} ---\n${file.text}`).join('\n\n'),
+        contents.map(file => file.name).join(', '),
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to read file';
+      setFileError(msg);
+      console.error('[PDF]', err);
+    }
   }, [onDataSubmit]);
 
   const handleDrop = useCallback(async (e: React.DragEvent) => {
@@ -164,6 +172,12 @@ export function AnimatedBlob({ onDataSubmit, isDissolving }: AnimatedBlobProps) 
                   >
                     .pdf · .txt · .md · .csv · .json
                   </p>
+                  {fileError && (
+                    <p className="text-xs mt-2 px-2 py-1 rounded-lg font-medium"
+                      style={{ background: 'rgba(0,0,0,0.35)', color: '#fca5a5' }}>
+                      {fileError}
+                    </p>
+                  )}
                 </motion.div>
               </div>
             </BlobShell>
