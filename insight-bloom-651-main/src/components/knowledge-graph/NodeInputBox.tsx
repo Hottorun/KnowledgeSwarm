@@ -1,14 +1,43 @@
 import { useState, useCallback } from 'react';
 import { motion } from 'framer-motion';
 
+export interface NodeRelationship {
+  direction: 'out' | 'in';
+  predicate: string;
+  otherLabel: string;
+}
+
 interface NodeInputBoxProps {
   nodeLabel: string;
+  entityType?: string;
+  relationships?: NodeRelationship[];
   position: { x: number; y: number };
   onAction: (action: string, prompt: string) => void;
   onClose: () => void;
 }
 
-export function NodeInputBox({ nodeLabel, position, onAction, onClose }: NodeInputBoxProps) {
+const actions = [
+  {
+    key: 'expand',
+    label: 'Expand',
+    icon: '↗',
+    hint: 'Add key sub-topics and facts',
+  },
+  {
+    key: 'research',
+    label: 'Deep Research',
+    icon: '🔬',
+    hint: 'Stats, players, recent developments',
+  },
+  {
+    key: 'connect',
+    label: 'Connections',
+    icon: '🔗',
+    hint: 'Map dependencies and relationships',
+  },
+];
+
+export function NodeInputBox({ nodeLabel, entityType, relationships = [], position, onAction, onClose }: NodeInputBoxProps) {
   const [prompt, setPrompt] = useState('');
   const [dragOffset, setDragOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
@@ -17,19 +46,13 @@ export function NodeInputBox({ nodeLabel, position, onAction, onClose }: NodeInp
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      if (prompt.trim()) onAction('expand', prompt.trim());
+      onAction('expand', prompt.trim());
     }
     if (e.key === 'Escape') onClose();
   }, [prompt, onAction, onClose]);
 
-  const actions = [
-    { key: 'expand', label: 'Expand', icon: '↗' },
-    { key: 'research', label: 'Deep research', icon: '🔬' },
-    { key: 'connect', label: 'Find connections', icon: '🔗' },
-  ];
-
   const handlePointerDown = useCallback((e: React.PointerEvent) => {
-    if ((e.target as HTMLElement).tagName === 'INPUT') return;
+    if ((e.target as HTMLElement).tagName === 'INPUT' || (e.target as HTMLElement).tagName === 'BUTTON') return;
     setIsDragging(true);
     setDragStart({ x: e.clientX - dragOffset.x, y: e.clientY - dragOffset.y });
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
@@ -51,12 +74,12 @@ export function NodeInputBox({ nodeLabel, position, onAction, onClose }: NodeInp
       initial={{ opacity: 0, y: 8, scale: 0.95 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       exit={{ opacity: 0, y: 8, scale: 0.95 }}
-      transition={{ duration: 0.2 }}
-      className="fixed z-50 w-72"
+      transition={{ duration: 0.18 }}
+      className="fixed z-50 w-80"
       style={{
         left: position.x + dragOffset.x,
         top: position.y + dragOffset.y,
-        cursor: isDragging ? 'grabbing' : 'grab',
+        cursor: isDragging ? 'grabbing' : 'default',
       }}
       data-input-box
       onPointerDown={handlePointerDown}
@@ -72,18 +95,56 @@ export function NodeInputBox({ nodeLabel, position, onAction, onClose }: NodeInp
           backdropFilter: 'blur(20px)',
         }}
       >
-        <div className="px-3 pt-3 pb-2">
-          <p className="text-xs font-medium mb-2" style={{ color: 'var(--muted-foreground)' }}>
-            {nodeLabel}
-          </p>
+        {/* Header — node identity */}
+        <div className="px-4 pt-3 pb-2 cursor-grab" style={{ borderBottom: '1px solid var(--border)' }}>
+          <div className="flex items-start justify-between gap-2">
+            <div className="flex-1 min-w-0">
+              {entityType && (
+                <span className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: 'var(--muted-foreground)' }}>
+                  {entityType}
+                </span>
+              )}
+              <p className="text-sm font-semibold leading-tight truncate" style={{ color: 'var(--foreground)' }}>
+                {nodeLabel}
+              </p>
+            </div>
+            <button
+              onClick={onClose}
+              className="shrink-0 w-5 h-5 flex items-center justify-center rounded-full text-xs transition-colors hover:bg-accent"
+              style={{ color: 'var(--muted-foreground)' }}
+            >
+              ✕
+            </button>
+          </div>
+
+          {/* Relationships — what this node actually means in context */}
+          {relationships.length > 0 && (
+            <div className="mt-2 space-y-1">
+              {relationships.map((rel, i) => (
+                <div key={i} className="flex items-baseline gap-1.5 text-xs leading-snug">
+                  <span className="shrink-0 font-mono" style={{ color: 'var(--muted-foreground)', fontSize: 10 }}>
+                    {rel.direction === 'out' ? '→' : '←'}
+                  </span>
+                  <span style={{ color: 'var(--muted-foreground)' }}>{rel.predicate}</span>
+                  <span className="font-medium truncate" style={{ color: 'var(--foreground)' }}>
+                    "{rel.otherLabel}"
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Prompt input */}
+        <div className="px-4 py-2.5">
           <input
             type="text"
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Ask AI to expand, analyze, or connect…"
+            placeholder="Ask a specific question about this node…"
             autoFocus
-            className="w-full text-sm px-0 py-1 focus:outline-none"
+            className="w-full text-xs py-1 focus:outline-none"
             style={{
               background: 'transparent',
               color: 'var(--foreground)',
@@ -91,15 +152,20 @@ export function NodeInputBox({ nodeLabel, position, onAction, onClose }: NodeInp
             }}
           />
         </div>
+
+        {/* Action buttons */}
         <div className="flex border-t" style={{ borderColor: 'var(--border)' }}>
           {actions.map((action) => (
             <button
               key={action.key}
-              onClick={() => onAction(action.key, prompt || action.label)}
-              className="flex-1 text-xs py-2.5 font-medium transition-colors duration-150 hover:bg-accent"
-              style={{ color: 'var(--muted-foreground)' }}
+              onClick={() => onAction(action.key, prompt.trim())}
+              className="flex-1 flex flex-col items-center gap-0.5 py-2.5 px-1 text-center transition-colors duration-150 hover:bg-accent"
+              title={action.hint}
             >
-              {action.icon} {action.label}
+              <span className="text-sm">{action.icon}</span>
+              <span className="text-[10px] font-medium leading-tight" style={{ color: 'var(--muted-foreground)' }}>
+                {action.label}
+              </span>
             </button>
           ))}
         </div>

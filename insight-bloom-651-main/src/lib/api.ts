@@ -26,8 +26,12 @@ export async function saveOpenAIKey(apiKey: string): Promise<void> {
   localStorage.setItem('openai_configured', 'true');
 }
 
-export async function createRun(): Promise<string> {
-  const res = await fetch(`${API_BASE}/runs`, { method: 'POST' });
+export async function createRun(prompt: string): Promise<string> {
+  const res = await fetch(`${API_BASE}/runs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt: prompt.slice(0, 200) || 'Knowledge graph' }),
+  });
   if (!res.ok) throw new Error('Failed to create run');
   const data = await res.json() as { runId: string };
   return data.runId;

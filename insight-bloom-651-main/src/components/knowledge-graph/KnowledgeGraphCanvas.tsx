@@ -23,17 +23,20 @@ import { TopNav } from './TopNav';
 import { EdgeButton } from './EdgeButton';
 import { FloatingEdge } from './FloatingEdge';
 import type { AIReasoningStep, DataSource } from './types';
+import type { NodeRelationship } from './NodeInputBox';
+import { createRun, openRunStream, expandSubtree as apiExpandSubtree } from '@/lib/api';
 
 type GraphLayoutNode = Node<GraphNodeData>;
+
+// ── Force-directed layout ─────────────────────────────────────────────────────
 
 function forceDirectedLayout(layoutNodes: GraphLayoutNode[], layoutEdges: Edge[]): GraphLayoutNode[] {
   if (layoutNodes.length === 0) return layoutNodes;
 
-  // Tuning constants
-  const REPULSION = 18000;       // node-to-node repulsion strength
-  const IDEAL_LENGTH = 210;      // preferred edge rest length (pixels)
-  const STIFFNESS = 0.07;        // spring pull along each edge
-  const DAMPING = 0.80;          // velocity decay per step
+  const REPULSION = 18000;
+  const IDEAL_LENGTH = 210;
+  const STIFFNESS = 0.07;
+  const DAMPING = 0.80;
   const ITERATIONS = 450;
 
   const pos = new Map<string, { x: number; y: number }>(
@@ -62,7 +65,6 @@ function forceDirectedLayout(layoutNodes: GraphLayoutNode[], layoutEdges: Edge[]
         let dy = pb.y - pa.y;
         const d2 = dx * dx + dy * dy;
         if (d2 < 0.01) {
-          // Jitter perfectly coincident nodes so they separate
           const angle = (i + j * 1.618) * 2.399;
           dx = Math.cos(angle) * 0.1;
           dy = Math.sin(angle) * 0.1;
@@ -112,14 +114,15 @@ function forceDirectedLayout(layoutNodes: GraphLayoutNode[], layoutEdges: Edge[]
   return layoutNodes.map(n => ({ ...n, position: pos.get(n.id) ?? n.position }));
 }
 
-// Expanded node dimensions (the larger state — worst case for overlap checks)
+// ── Overlap resolver ──────────────────────────────────────────────────────────
+
 const NODE_DIMS: Record<string, { w: number; h: number }> = {
   root:     { w: 180, h: 64 },
   topic:    { w: 150, h: 52 },
   subtopic: { w: 130, h: 46 },
   detail:   { w: 110, h: 40 },
 };
-const NODE_GAP = 14; // minimum pixel gap between any two node edges
+const NODE_GAP = 14;
 
 function resolveOverlaps(layoutNodes: GraphLayoutNode[]): GraphLayoutNode[] {
   if (layoutNodes.length < 2) return layoutNodes;
@@ -129,7 +132,6 @@ function resolveOverlaps(layoutNodes: GraphLayoutNode[]): GraphLayoutNode[] {
     layoutNodes.filter(n => (n.data as GraphNodeData).nodeType === 'root').map(n => n.id)
   );
 
-  // Iteratively separate overlapping pairs until none remain
   for (let iter = 0; iter < 1000; iter++) {
     let anyOverlap = false;
 
@@ -142,7 +144,6 @@ function resolveOverlaps(layoutNodes: GraphLayoutNode[]): GraphLayoutNode[] {
         const da = NODE_DIMS[(a.data as GraphNodeData).nodeType] ?? NODE_DIMS.detail;
         const db = NODE_DIMS[(b.data as GraphNodeData).nodeType] ?? NODE_DIMS.detail;
 
-        // AABB overlap with gap padding
         const overlapX = Math.min(pa.x + da.w + NODE_GAP, pb.x + db.w + NODE_GAP) - Math.max(pa.x - NODE_GAP, pb.x - NODE_GAP);
         const overlapY = Math.min(pa.y + da.h + NODE_GAP, pb.y + db.h + NODE_GAP) - Math.max(pa.y - NODE_GAP, pb.y - NODE_GAP);
 
@@ -155,7 +156,6 @@ function resolveOverlaps(layoutNodes: GraphLayoutNode[]): GraphLayoutNode[] {
         const aCenterX = pa.x + da.w / 2, aCenterY = pa.y + da.h / 2;
         const bCenterX = pb.x + db.w / 2, bCenterY = pb.y + db.h / 2;
 
-        // Separate along the axis with smaller penetration (minimum separation vector)
         if (overlapX <= overlapY) {
           const dir = bCenterX >= aCenterX ? 1 : -1;
           const half = overlapX / 2;
@@ -182,139 +182,96 @@ function layout(nodes: GraphLayoutNode[], edges: Edge[]): GraphLayoutNode[] {
   return resolveOverlaps(forceDirectedLayout(nodes, edges));
 }
 
-// Deterministic pseudo-random based on index
+// ── Demo seed graph ───────────────────────────────────────────────────────────
+// Produces a fake mindmap immediately so nodes are clickable for testing expansion
+// before real LLM extraction arrives via SSE.
+
 function seededRandom(seed: number): number {
   const x = Math.sin(seed * 127.1 + 311.7) * 43758.5453;
   return x - Math.floor(x);
 }
 
-// Sample graph generation from text
-function generateGraphFromText(text: string): { nodes: Node[]; edges: Edge[]; reasoning: AIReasoningStep[] } {
+function generateDemoGraph(text: string): { nodes: GraphLayoutNode[]; edges: Edge[]; reasoning: AIReasoningStep[] } {
   const words = text.split(/[\s,;.]+/).filter(w => w.length > 3);
-  const topicWords = words.length >= 8 ? words.slice(0, 8) : [...words, 'Strategy', 'Growth', 'Systems', 'Analysis', 'Research', 'Markets', 'Design', 'Operations'].slice(0, 8);
-  const topics = topicWords.slice(0, 8);
+  const topicWords = words.length >= 8
+    ? words.slice(0, 8)
+    : [...words, 'Strategy', 'Growth', 'Systems', 'Analysis', 'Research', 'Markets', 'Design', 'Operations'].slice(0, 8);
+
   const rootId = 'root';
-
-  // Pre-supply measured dimensions so React Flow never re-measures nodes when
-  // the compact flag changes (which would cause position/edge jumps).
-  const nodeSizes: Record<string, { width: number; height: number }> = {
-    root: { width: 180, height: 64 }, topic: { width: 150, height: 52 },
-    subtopic: { width: 130, height: 46 }, detail: { width: 110, height: 40 },
-  };
-
-  const nodes: GraphLayoutNode[] = [
-    {
-      id: rootId,
-      type: 'graphNode',
-      position: { x: 0, y: 0 },
-      data: { label: 'Company Data', description: 'Knowledge root', nodeType: 'root' } as GraphNodeData,
-      measured: nodeSizes.root,
-    },
-  ];
-
+  const nodes: GraphLayoutNode[] = [{
+    id: rootId,
+    type: 'graphNode',
+    position: { x: 0, y: 0 },
+    data: { label: text.slice(0, 20) || 'Knowledge Root', description: 'Root', nodeType: 'root' },
+  }];
   const edges: Edge[] = [];
-  const reasoning: AIReasoningStep[] = [
-    { id: 'r1', text: 'Analyzing input text for key concepts and entities...', timestamp: new Date(), type: 'analysis' },
-  ];
+  const reasoning: AIReasoningStep[] = [{
+    id: 'r1',
+    text: 'Demo graph ready — click any node and hit Expand to test real AI expansion via the backend.',
+    timestamp: new Date(),
+    type: 'analysis',
+  }];
 
-  const angleStep = (2 * Math.PI) / topics.length;
-  const baseRadius = 400;
+  const angleStep = (2 * Math.PI) / topicWords.length;
+  const baseRadius = 280;
 
-  topics.forEach((topic, i) => {
+  topicWords.forEach((word, i) => {
     const angle = angleStep * i - Math.PI / 2;
     const topicId = `topic-${i}`;
     const topicRadius = baseRadius + (seededRandom(i * 7 + 3) - 0.5) * 80;
+    const label = word.charAt(0).toUpperCase() + word.slice(1);
+
     nodes.push({
       id: topicId,
       type: 'graphNode',
-      position: {
-        x: Math.cos(angle) * topicRadius,
-        y: Math.sin(angle) * topicRadius,
-      },
-      data: { label: topic.charAt(0).toUpperCase() + topic.slice(1), nodeType: 'topic' } as GraphNodeData,
-      measured: nodeSizes.topic,
+      position: { x: Math.cos(angle) * topicRadius, y: Math.sin(angle) * topicRadius },
+      data: { label, nodeType: 'topic', description: 'Topic' },
     });
-    edges.push({
-      id: `e-root-${topicId}`,
-      source: rootId,
-      target: topicId,
-      type: 'floating',
-    });
-    reasoning.push({
-      id: `r-${i + 2}`,
-      text: `Identified "${topic}" as a key concept and connected to root.`,
-      timestamp: new Date(),
-      type: 'connection',
-    });
+    edges.push({ id: `e-root-${topicId}`, source: rootId, target: topicId, type: 'floating' });
 
-    // Subtopics
-    const subCount = Math.floor(Math.random() * 3) + 3;
+    const subCount = 3;
     for (let j = 0; j < subCount; j++) {
       const sectorWidth = angleStep * 0.85;
-      const subAngle = angle - sectorWidth / 2 + (sectorWidth / (subCount - 1 || 1)) * j;
-      const subRadiusBase = topicRadius + 220 + (seededRandom(i * 13 + j * 17 + 5) - 0.5) * 60;
+      const subAngle = angle - sectorWidth / 2 + (sectorWidth / (subCount - 1)) * j;
+      const subRadius = topicRadius + 160 + (seededRandom(i * 13 + j * 17 + 5) - 0.5) * 60;
       const subId = `sub-${i}-${j}`;
       nodes.push({
         id: subId,
         type: 'graphNode',
-        position: {
-          x: Math.cos(subAngle) * subRadiusBase,
-          y: Math.sin(subAngle) * subRadiusBase,
-        },
-        data: {
-          label: `${topic.slice(0, 6)}-${j + 1}`,
-          description: 'Related concept',
-          nodeType: 'subtopic',
-        } as GraphNodeData,
-        measured: nodeSizes.subtopic,
+        position: { x: Math.cos(subAngle) * subRadius, y: Math.sin(subAngle) * subRadius },
+        data: { label: `${label.slice(0, 6)}-${j + 1}`, description: 'Subtopic', nodeType: 'subtopic' },
       });
-      edges.push({
-        id: `e-${topicId}-${subId}`,
-        source: topicId,
-        target: subId,
-        type: 'floating',
-      });
-
-      // Detail nodes (third level)
-      const detailCount = Math.floor(Math.random() * 2) + 1;
-      for (let k = 0; k < detailCount; k++) {
-        const detailSpread = detailCount > 1 ? 0.3 : 0;
-        const detailAngle = subAngle + (k - (detailCount - 1) / 2) * detailSpread;
-        const detailRadius = subRadiusBase + 180 + (seededRandom(i * 23 + j * 31 + k * 41 + 9) - 0.5) * 50;
-        const detailId = `detail-${i}-${j}-${k}`;
-        nodes.push({
-          id: detailId,
-          type: 'graphNode',
-          position: {
-            x: Math.cos(detailAngle) * detailRadius,
-            y: Math.sin(detailAngle) * detailRadius,
-          },
-          data: {
-            label: `${topic.slice(0, 4)}-${j + 1}.${k + 1}`,
-            description: 'Detail node',
-            nodeType: 'detail' as const,
-          } as GraphNodeData,
-          measured: nodeSizes.detail,
-        });
-        edges.push({
-          id: `e-${subId}-${detailId}`,
-          source: subId,
-          target: detailId,
-          type: 'floating',
-        });
-      }
+      edges.push({ id: `e-${topicId}-${subId}`, source: topicId, target: subId, type: 'floating' });
     }
   });
 
-  reasoning.push({
-    id: 'rfinal',
-    text: `Generated ${nodes.length} nodes and ${edges.length} connections from the input data.`,
-    timestamp: new Date(),
-    type: 'analysis',
-  });
-
-  return { nodes: layout(nodes, edges), edges, reasoning };
+  return { nodes, edges, reasoning };
 }
+
+// ── SSE payload types ─────────────────────────────────────────────────────────
+
+interface BackendNode {
+  id: string;
+  label: string;
+  type: string;
+  properties: Record<string, unknown>;
+}
+
+interface BackendEdge {
+  source: string;
+  target: string;
+  predicate: string;
+  confidence?: number;
+}
+
+interface SseEnvelope<T> {
+  type: string;
+  runId: string;
+  timestamp: string;
+  payload: T;
+}
+
+// ── Component ─────────────────────────────────────────────────────────────────
 
 function KnowledgeGraphCanvasInner() {
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
@@ -327,7 +284,8 @@ function KnowledgeGraphCanvasInner() {
   const [rightPanel, setRightPanel] = useState(false);
   const [focusMode, setFocusMode] = useState(false);
   const [connectionMode, setConnectionMode] = useState(false);
-  const [dataSources, setDataSources] = useState<DataSource[]>([]);
+  const [, setDataSources] = useState<DataSource[]>([]);
+  const [selectedNodeRelationships, setSelectedNodeRelationships] = useState<NodeRelationship[]>([]);
   const [reasoningSteps, setReasoningSteps] = useState<AIReasoningStep[]>([]);
   const reactFlowInstance = useReactFlow();
 
@@ -335,11 +293,18 @@ function KnowledgeGraphCanvasInner() {
   const edgeTypes = useMemo(() => ({ floating: FloatingEdge }), []);
   const [highlightedNodes, setHighlightedNodes] = useState<Set<string>>(new Set());
   const [expandedSubtree, setExpandedSubtree] = useState<Set<string>>(new Set());
-  // Holds TOC-clicked expansions; only cleared on zoom-out, not pane clicks
   const [pinnedExpansion, setPinnedExpansion] = useState<Set<string>>(new Set());
-  // Track full viewport so panning triggers the expand/compact logic too
   const [viewport, setViewport] = useState({ x: 0, y: 0, zoom: 1 });
   const viewportDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Backend integration state
+  const [runId, setRunId] = useState<string | null>(null);
+  const eventSourceRef = useRef<EventSource | null>(null);
+  const nodePositionRef = useRef<Map<string, { x: number; y: number }>>(new Map());
+  const childCountRef = useRef<Map<string, number>>(new Map());
+  const placeholderNodesRef = useRef<Set<string>>(new Set());
+  const expansionAnchorRef = useRef<{ id: string; pos: { x: number; y: number } } | null>(null);
+  const expansionChildIdxRef = useRef<number>(0);
 
   useOnViewportChange({
     onChange: useCallback((vp: { x: number; y: number; zoom: number }) => {
@@ -377,7 +342,6 @@ function KnowledgeGraphCanvasInner() {
         }
       });
 
-      // Replace (not merge) so nodes that pan off-screen compact back
       setExpandedSubtree(prev => {
         if (prev.size === visibleIds.size && [...visibleIds].every(id => prev.has(id))) return prev;
         return visibleIds;
@@ -387,8 +351,56 @@ function KnowledgeGraphCanvasInner() {
     return () => { if (viewportDebounceRef.current) clearTimeout(viewportDebounceRef.current); };
   }, [viewport, nodes]);
 
-  const handleDataSubmit = useCallback((text: string) => {
+  // Close SSE on unmount
+  useEffect(() => {
+    return () => { eventSourceRef.current?.close(); };
+  }, []);
+
+  // Assign a spiral position to a new node that has no known parent yet
+  const assignSpiralPosition = useCallback((nodeId: string): { x: number; y: number } => {
+    const total = nodePositionRef.current.size;
+    const angle = total * 137.508 * (Math.PI / 180);
+    const radius = 150 + total * 60;
+    const pos = { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius };
+    nodePositionRef.current.set(nodeId, pos);
+    placeholderNodesRef.current.add(nodeId);
+    return pos;
+  }, []);
+
+  // Reposition a placeholder node relative to its newly known parent
+  const assignChildPosition = useCallback((sourceId: string, targetId: string): { x: number; y: number } | null => {
+    if (!placeholderNodesRef.current.has(targetId)) return null;
+    const sourcePos = nodePositionRef.current.get(sourceId);
+    if (!sourcePos) return null;
+
+    const idx = childCountRef.current.get(sourceId) ?? 0;
+    childCountRef.current.set(sourceId, idx + 1);
+    const angle = idx * 137.508 * (Math.PI / 180);
+    const radius = 200 + idx * 15;
+    const pos = {
+      x: sourcePos.x + Math.cos(angle) * radius,
+      y: sourcePos.y + Math.sin(angle) * radius,
+    };
+    nodePositionRef.current.set(targetId, pos);
+    placeholderNodesRef.current.delete(targetId);
+    return pos;
+  }, []);
+
+  const handleDataSubmit = useCallback(async (text: string) => {
+    eventSourceRef.current?.close();
+    eventSourceRef.current = null;
+
+    nodePositionRef.current.clear();
+    childCountRef.current.clear();
+    placeholderNodesRef.current.clear();
+
     setIsDissolving(true);
+
+    const { nodes: demoNodes, edges: demoEdges, reasoning: demoReasoning } = generateDemoGraph(text);
+
+    // Pre-populate position refs so expansion SSE nodes land near their parent
+    demoNodes.forEach(n => nodePositionRef.current.set(n.id, n.position));
+
     setDataSources(prev => [...prev, {
       id: `ds-${Date.now()}`,
       name: text.slice(0, 40) + (text.length > 40 ? '…' : ''),
@@ -396,15 +408,113 @@ function KnowledgeGraphCanvasInner() {
       addedAt: new Date(),
     }]);
 
+    let newRunId: string;
+    try {
+      newRunId = await createRun(text);
+    } catch (err) {
+      setIsDissolving(false);
+      setReasoningSteps([{
+        id: 'err-run',
+        text: `Failed to connect to backend: ${err instanceof Error ? err.message : 'Unknown error'}. Is the API running?`,
+        timestamp: new Date(),
+        type: 'analysis',
+      }]);
+      setNodes(demoNodes);
+      setEdges(demoEdges);
+      setIsEmpty(false);
+      return;
+    }
+
+    setRunId(newRunId);
+
+    const source = openRunStream(newRunId);
+    eventSourceRef.current = source;
+
+    source.addEventListener('node.created', (e: MessageEvent) => {
+      const envelope = JSON.parse(e.data) as SseEnvelope<{ node: BackendNode }>;
+      const backendNode = envelope.payload.node;
+
+      const anchor = expansionAnchorRef.current;
+      let pos: { x: number; y: number };
+      if (anchor) {
+        const idx = expansionChildIdxRef.current++;
+        const angle = idx * 137.508 * (Math.PI / 180);
+        const radius = 220 + idx * 20;
+        pos = {
+          x: anchor.pos.x + Math.cos(angle) * radius,
+          y: anchor.pos.y + Math.sin(angle) * radius,
+        };
+      } else {
+        pos = assignSpiralPosition(backendNode.id);
+      }
+      nodePositionRef.current.set(backendNode.id, pos);
+      placeholderNodesRef.current.add(backendNode.id);
+
+      setNodes(prev => {
+        if (prev.some(n => n.id === backendNode.id)) return prev;
+        return [...prev, {
+          id: backendNode.id,
+          type: 'graphNode',
+          position: pos,
+          data: { label: backendNode.label, nodeType: 'subtopic', description: backendNode.type },
+        } as GraphLayoutNode];
+      });
+
+      // Connect every new node back to the clicked node so nothing is orphaned
+      if (anchor) {
+        const bridgeEdgeId = `e-expand-${anchor.id}-${backendNode.id}`;
+        setEdges(prev => prev.some(ex => ex.id === bridgeEdgeId) ? prev : [...prev, {
+          id: bridgeEdgeId,
+          source: anchor.id,
+          target: backendNode.id,
+          label: 'expands',
+          type: 'floating',
+        }]);
+      }
+    });
+
+    source.addEventListener('edge.created', (e: MessageEvent) => {
+      const envelope = JSON.parse(e.data) as SseEnvelope<{ edge: BackendEdge }>;
+      const backendEdge = envelope.payload.edge;
+      const edgeId = `${backendEdge.source}:${backendEdge.predicate}:${backendEdge.target}`;
+
+      const newPos = assignChildPosition(backendEdge.source, backendEdge.target);
+      if (newPos) {
+        setNodes(prev => prev.map(n => n.id === backendEdge.target ? { ...n, position: newPos } : n));
+      }
+
+      setEdges(prev => {
+        if (prev.some(edge => edge.id === edgeId)) return prev;
+        return [...prev, {
+          id: edgeId,
+          source: backendEdge.source,
+          target: backendEdge.target,
+          label: backendEdge.predicate,
+          type: 'floating',
+          data: { confidence: backendEdge.confidence },
+        }];
+      });
+    });
+
+    source.addEventListener('agent.step', (e: MessageEvent) => {
+      const envelope = JSON.parse(e.data) as SseEnvelope<{ agentName: string; eventType: string; message: string }>;
+      const { agentName, eventType, message } = envelope.payload;
+      setReasoningSteps(prev => [...prev, {
+        id: `r-${Date.now()}-${Math.random()}`,
+        text: `[${agentName}] ${message}`,
+        timestamp: new Date(),
+        type: eventType.includes('expand') ? 'expansion' : eventType.includes('connect') ? 'connection' : 'analysis',
+      }]);
+    });
+
     setTimeout(() => {
-      const { nodes: newNodes, edges: newEdges, reasoning } = generateGraphFromText(text);
-      setNodes(newNodes);
-      setEdges(newEdges);
-      setReasoningSteps(reasoning);
+      setNodes(demoNodes);
+      setEdges(demoEdges);
+      setReasoningSteps(demoReasoning);
       setIsEmpty(false);
       setIsDissolving(false);
     }, 900);
-  }, [setNodes, setEdges]);
+  }, [setNodes, setEdges, assignSpiralPosition, assignChildPosition]);
 
   const handleNodeClick = useCallback((_: React.MouseEvent, node: Node) => {
     setSelectedNode(node);
@@ -426,49 +536,59 @@ function KnowledgeGraphCanvasInner() {
     );
     setHighlightedNodes(childIds);
 
-    // Find average direction of children to place input box on opposite side
+    const rels: NodeRelationship[] = edges
+      .filter(e => e.source === node.id || e.target === node.id)
+      .slice(0, 4)
+      .map(e => {
+        const predicate = (typeof e.label === 'string' && e.label && e.label !== 'expands')
+          ? e.label
+          : (e.data as { predicate?: string })?.predicate ?? 'relates to';
+        if (e.source === node.id) {
+          const other = nodes.find(n => n.id === e.target);
+          return { direction: 'out' as const, predicate, otherLabel: (other?.data as GraphNodeData)?.label ?? e.target };
+        } else {
+          const other = nodes.find(n => n.id === e.source);
+          return { direction: 'in' as const, predicate, otherLabel: (other?.data as GraphNodeData)?.label ?? e.source };
+        }
+      });
+    setSelectedNodeRelationships(rels);
+
     const childNodes = nodes.filter(n => childIds.has(n.id));
     const targetEl = ((_ as React.MouseEvent).currentTarget) as HTMLElement;
     const rect = targetEl.getBoundingClientRect();
-    const boxWidth = 288; // w-72
-    const boxHeight = 140;
+    const boxWidth = 320;
+    const boxHeight = 180;
     const nodeCenterX = rect.left + rect.width / 2;
     const nodeCenterY = rect.top + rect.height / 2;
 
     if (childNodes.length > 0 && reactFlowInstance) {
-      // Calculate average child direction in screen space
-      const viewport = reactFlowInstance.getViewport();
+      const vp = reactFlowInstance.getViewport();
       let avgDx = 0, avgDy = 0;
       childNodes.forEach(c => {
-        const screenX = c.position.x * viewport.zoom + viewport.x;
-        const screenY = c.position.y * viewport.zoom + viewport.y;
-        avgDx += screenX - (node.position.x * viewport.zoom + viewport.x);
-        avgDy += screenY - (node.position.y * viewport.zoom + viewport.y);
+        const screenX = c.position.x * vp.zoom + vp.x;
+        const screenY = c.position.y * vp.zoom + vp.y;
+        avgDx += screenX - (node.position.x * vp.zoom + vp.x);
+        avgDy += screenY - (node.position.y * vp.zoom + vp.y);
       });
       avgDx /= childNodes.length;
       avgDy /= childNodes.length;
 
-      // Place box on opposite side of children
       const absDx = Math.abs(avgDx);
       const absDy = Math.abs(avgDy);
       let posX: number, posY: number;
 
       if (absDy > absDx) {
-        // Children are mostly above/below — place box on opposite vertical side
         posX = nodeCenterX - boxWidth / 2;
         posY = avgDy > 0 ? rect.top - boxHeight - 8 : rect.bottom + 8;
       } else {
-        // Children are mostly left/right — place box on opposite horizontal side
         posY = nodeCenterY - boxHeight / 2;
         posX = avgDx > 0 ? rect.left - boxWidth - 8 : rect.right + 8;
       }
 
-      // Clamp to viewport
       posX = Math.max(8, Math.min(window.innerWidth - boxWidth - 8, posX));
       posY = Math.max(8, Math.min(window.innerHeight - boxHeight - 8, posY));
       setInputBoxPos({ x: posX, y: posY });
     } else {
-      // No children — default below
       const spaceBelow = window.innerHeight - rect.bottom;
       if (spaceBelow >= boxHeight + 8) {
         setInputBoxPos({ x: nodeCenterX - boxWidth / 2, y: rect.bottom + 8 });
@@ -485,66 +605,183 @@ function KnowledgeGraphCanvasInner() {
     }
   }, [selectedNode]);
 
-  const handleNodeAction = useCallback((action: string, prompt: string) => {
+  const handleNodeAction = useCallback(async (action: string, prompt: string) => {
     if (!selectedNode) return;
 
-    const newNodes: Node[] = [];
-    const newEdges: Edge[] = [];
-    const count = action === 'expand' ? 3 : action === 'research' ? 4 : 2;
+    const nodeData = selectedNode.data as GraphNodeData;
 
-    for (let i = 0; i < count; i++) {
-      const id = `new-${Date.now()}-${i}`;
-      const angle = (Math.PI * 2 / count) * i;
-      newNodes.push({
-        id,
-        type: 'graphNode',
-        position: {
-          x: selectedNode.position.x + Math.cos(angle) * 180,
-          y: selectedNode.position.y + Math.sin(angle) * 180 + 80,
-        },
-        data: {
-          label: `${prompt.slice(0, 12)}-${i + 1}`,
-          description: `AI-generated from ${action}`,
-          nodeType: 'subtopic',
-        } as GraphNodeData,
+    // Close the input box immediately regardless
+    setSelectedNode(null);
+    setInputBoxPos(null);
+
+    // No backend connection — do a local fake expansion so the UI is testable
+    if (!runId) {
+      console.warn('[KnowledgeGraph] No runId — backend not connected, using local demo expansion');
+      const count = action === 'research' ? 4 : 3;
+      const newNodes: Node[] = [];
+      const newEdges: Edge[] = [];
+      for (let i = 0; i < count; i++) {
+        const id = `demo-exp-${Date.now()}-${i}`;
+        const angle = (Math.PI * 2 / count) * i;
+        newNodes.push({
+          id,
+          type: 'graphNode',
+          position: {
+            x: selectedNode.position.x + Math.cos(angle) * 200,
+            y: selectedNode.position.y + Math.sin(angle) * 200,
+          },
+          data: { label: `${nodeData.label} › ${i + 1}`, nodeType: 'subtopic', description: 'demo' } as GraphNodeData,
+        });
+        newEdges.push({ id: `e-demo-${selectedNode.id}-${id}`, source: selectedNode.id, target: id, type: 'floating' });
+      }
+      setNodes(prev => {
+        const combined = [...prev, ...newNodes] as GraphLayoutNode[];
+        const allEdges = [...edges, ...newEdges];
+        return layout(combined, allEdges);
       });
-      newEdges.push({
-        id: `e-${selectedNode.id}-${id}`,
-        source: selectedNode.id,
-        target: id,
-        type: 'floating',
+      setEdges(prev => [...prev, ...newEdges]);
+      setReasoningSteps(prev => [...prev, {
+        id: `r-demo-${Date.now()}`,
+        text: `[Demo] Local expansion of "${nodeData.label}" (backend not connected — restart API to get real AI expansion)`,
+        timestamp: new Date(),
+        type: 'expansion',
+      }]);
+      return;
+    }
+
+    // Set expansion anchor — start child index after existing children so new nodes don't overlap
+    expansionAnchorRef.current = { id: selectedNode.id, pos: { ...selectedNode.position } };
+    expansionChildIdxRef.current = edges.filter(e => e.source === selectedNode.id).length;
+
+    // ── Collect subtree going DOWN (children of selected node) ──────────────
+    const subtreeIds = new Set<string>([selectedNode.id]);
+    const downQueue = [selectedNode.id];
+    while (downQueue.length) {
+      const current = downQueue.shift()!;
+      edges.filter(e => e.source === current).forEach(e => {
+        if (!subtreeIds.has(e.target)) {
+          subtreeIds.add(e.target);
+          downQueue.push(e.target);
+        }
       });
     }
 
-    setNodes(prev => {
-      const combined = [...prev, ...newNodes] as GraphLayoutNode[];
-      const allEdges = [...edges, ...newEdges];
-      return layout(combined, allEdges);
-    });
-    setEdges(prev => [...prev, ...newEdges]);
+    const subtreeNodes = nodes.filter(n => subtreeIds.has(n.id));
+    const subtreeEdges = edges.filter(e => subtreeIds.has(e.source) && subtreeIds.has(e.target));
+
+    // ── Collect ancestors going UP (parent chain to root) ────────────────────
+    const ancestorIds = new Set<string>();
+    const upQueue = [selectedNode.id];
+    while (upQueue.length) {
+      const current = upQueue.shift()!;
+      edges
+        .filter(e => e.target === current && !subtreeIds.has(e.source))
+        .forEach(e => {
+          if (!ancestorIds.has(e.source)) {
+            ancestorIds.add(e.source);
+            upQueue.push(e.source);
+          }
+        });
+    }
+
+    const ancestorNodes = nodes.filter(n => ancestorIds.has(n.id));
+    const ancestorEdges = edges.filter(e =>
+      (ancestorIds.has(e.source) && (ancestorIds.has(e.target) || e.target === selectedNode.id)) ||
+      (ancestorIds.has(e.target) && ancestorIds.has(e.source))
+    );
+
+    // ── Build breadcrumb path for question context ───────────────────────────
+    const breadcrumb: string[] = [];
+    let cursor = selectedNode.id;
+    const visited = new Set<string>();
+    while (true) {
+      visited.add(cursor);
+      const parentEdge = edges.find(e => e.target === cursor && ancestorIds.has(e.source) && !visited.has(e.source));
+      if (!parentEdge) break;
+      const parentNode = nodes.find(n => n.id === parentEdge.source);
+      if (!parentNode) break;
+      breadcrumb.unshift((parentNode.data as GraphNodeData).label);
+      cursor = parentEdge.source;
+    }
+    breadcrumb.push(nodeData.label);
+    const contextPath = breadcrumb.join(' › ');
+
+    const rootNode = {
+      id: selectedNode.id,
+      label: nodeData.label,
+      type: nodeData.description ?? 'Entity',
+    };
+
+    const getLabel = (id: string) => (nodes.find(n => n.id === id)?.data as GraphNodeData)?.label ?? id;
+    const getPredicate = (e: Edge) =>
+      (typeof e.label === 'string' && e.label ? e.label : (e.data as { predicate?: string })?.predicate) ?? 'related_to';
+
+    const contextNodes = [
+      ...subtreeNodes.filter(n => n.id !== selectedNode.id),
+      ...ancestorNodes,
+    ].map(n => ({
+      id: n.id,
+      label: (n.data as GraphNodeData).label,
+      type: (n.data as GraphNodeData).description ?? 'Entity',
+    }));
+
+    const contextEdges = [
+      ...subtreeEdges,
+      ...ancestorEdges,
+    ].map(e => ({
+      subjectLabel: getLabel(e.source),
+      predicate: getPredicate(e),
+      objectLabel: getLabel(e.target),
+    }));
+
+    const label = nodeData.label;
+    const pathContext = breadcrumb.length > 1 ? ` (context path: ${contextPath})` : '';
+    const defaultQuestions: Record<string, string> = {
+      expand:   `What are the key sub-topics, components, and specific facts about "${label}"${pathContext}? Include concrete names, figures, and examples relevant specifically to this context.`,
+      research: `Do deep research on "${label}"${pathContext}. Find: recent statistics, key players, market size or scale, major trends, challenges, and specific recent developments. Only include information relevant to this specific context, not generic results.`,
+      connect:  `Map the relationship network of "${label}"${pathContext}. What companies, people, markets, technologies, regulations, and events is it directly connected to within this context? Focus on dependencies and influences.`,
+    };
+    const question = prompt
+      ? `${prompt} — specifically about "${label}"${pathContext}`
+      : defaultQuestions[action] ?? `Expand "${label}"${pathContext} with more details`;
+
     setReasoningSteps(prev => [...prev, {
       id: `r-${Date.now()}`,
-      text: `${action}: "${prompt}" — generated ${count} new nodes from "${(selectedNode.data as GraphNodeData).label}".`,
+      text: `Expanding "${nodeData.label}" — searching for "${question}"…`,
       timestamp: new Date(),
-      type: action === 'connect' ? 'connection' : 'expansion',
+      type: 'expansion',
     }]);
-    setSelectedNode(null);
-    setInputBoxPos(null);
-  }, [selectedNode, setNodes, setEdges]);
+
+    try {
+      const result = await apiExpandSubtree(runId, rootNode, contextNodes, contextEdges, question);
+      setReasoningSteps(prev => [...prev, {
+        id: `r-${Date.now()}-done`,
+        text: `"${nodeData.label}" expanded: ${result.newTriplesPersisted} new relationship(s). ${result.summary}`,
+        timestamp: new Date(),
+        type: 'expansion',
+      }]);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      console.error('[KnowledgeGraph] Expansion failed:', msg);
+      setReasoningSteps(prev => [...prev, {
+        id: `r-${Date.now()}-err`,
+        text: `Expansion failed: ${msg}`,
+        timestamp: new Date(),
+        type: 'analysis',
+      }]);
+    }
+  }, [selectedNode, runId, nodes, edges, setNodes, setEdges]);
 
   const handleNodeFocus = useCallback((nodeId: string) => {
     const node = nodes.find(n => n.id === nodeId);
     if (node && reactFlowInstance) {
-      // Collect node + children + grandchildren
       const ids = new Set<string>([nodeId]);
       const children = edges.filter(e => e.source === nodeId).map(e => e.target);
       children.forEach(cid => ids.add(cid));
-      // Add grandchildren (children of children)
       children.forEach(cid => {
         edges.filter(e => e.source === cid).forEach(e => ids.add(e.target));
       });
 
-      // Also collect all deeper descendants for expansion
       const allDescendants = new Set<string>([nodeId]);
       const queue = [nodeId];
       while (queue.length) {
@@ -557,12 +794,10 @@ function KnowledgeGraphCanvasInner() {
         });
       }
 
-      // Calculate bounding box of node + children + grandchildren
       const relevantNodes = nodes.filter(n => ids.has(n.id));
       if (relevantNodes.length > 0) {
         let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
         relevantNodes.forEach(n => {
-          // Use expanded node size estimates for the bounding box
           minX = Math.min(minX, n.position.x - 120);
           minY = Math.min(minY, n.position.y - 60);
           maxX = Math.max(maxX, n.position.x + 240);
@@ -658,9 +893,11 @@ function KnowledgeGraphCanvasInner() {
         {selectedNode && inputBoxPos && (
           <NodeInputBox
             nodeLabel={(selectedNode.data as GraphNodeData).label}
+            entityType={(selectedNode.data as GraphNodeData).description}
+            relationships={selectedNodeRelationships}
             position={inputBoxPos}
             onAction={handleNodeAction}
-            onClose={() => { setSelectedNode(null); setInputBoxPos(null); }}
+            onClose={() => { setSelectedNode(null); setInputBoxPos(null); setSelectedNodeRelationships([]); }}
           />
         )}
       </AnimatePresence>

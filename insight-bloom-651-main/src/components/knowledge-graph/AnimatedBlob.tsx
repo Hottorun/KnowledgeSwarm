@@ -24,17 +24,19 @@ export function AnimatedBlob({ onDataSubmit, isDissolving }: AnimatedBlobProps) 
     }
   }, [handleSubmit]);
 
-  const handleDrop = useCallback((e: React.DragEvent) => {
+  const handleDrop = useCallback(async (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragOver(false);
-    const files = Array.from(e.dataTransfer.files);
+    const files = Array.from(e.dataTransfer.files).filter(f =>
+      /\.(txt|md|csv|json)$/i.test(f.name)
+    );
     if (files.length > 0) {
-      onDataSubmit(`[Uploaded: ${files.map(f => f.name).join(', ')}]`);
+      const texts = await Promise.all(files.map(f => f.text()));
+      onDataSubmit(texts.join('\n\n---\n\n'));
+      return;
     }
     const text = e.dataTransfer.getData('text');
-    if (text) {
-      onDataSubmit(text);
-    }
+    if (text) onDataSubmit(text);
   }, [onDataSubmit]);
 
   if (isDissolving) {
