@@ -6,6 +6,7 @@ import { runWorker } from './worker';
 import type { SpecialistProfile } from './specialists';
 import { specialistDisplayName } from './specialists';
 import { parseJsonArrayPropertyItems, parseJsonObject } from './json';
+import { withAnthropicLimit } from './anthropicLimiter';
 
 const client = new Anthropic({ apiKey: config.anthropicApiKey });
 
@@ -60,7 +61,12 @@ export async function runSupervisor(
 
   let approved: Triple[];
   try {
-    approved = await supervisorReview(branch, specialist, allTriples);
+    approved = config.supervisorReviewEnabled
+      ? await supervisorReview(branch, specialist, allTriples)
+      : allTriples;
+    if (!config.supervisorReviewEnabled && allTriples.length > 0) {
+      await emitAgentEvent(runId, supervisorName, 'review.skipped', `Using ${allTriples.length} raw triple(s); local normalization will filter the final graph`);
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Supervisor review failed';
     console.error(`[${supervisorName}] ${message}`);
@@ -81,9 +87,9 @@ async function supervisorReview(branch: BranchPlan, specialist: SpecialistProfil
     return triples;
   }
 
-  const response = await client.messages.create({
+  const response = await withAnthropicLimit(() => client.messages.create({
     model: config.supervisorModel,
-    max_tokens: 8192,
+    max_tokens: 2048,
     system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
     messages: [{
       role: 'user',
@@ -93,7 +99,7 @@ Branch: "${branch.label}" - ${branch.focus}
 
 ${JSON.stringify(triples)}`,
     }],
-  });
+  }));
 
   const text = response.content.find(b => b.type === 'text')?.text ?? '';
   const output = parseSupervisorOutput(text);

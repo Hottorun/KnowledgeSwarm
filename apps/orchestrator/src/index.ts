@@ -3,7 +3,7 @@ import { decomposeDocument } from './agents/meta';
 import { runSupervisor } from './agents/supervisor';
 import { specialistForBranch } from './agents/specialists';
 import { emitAgentEvent, emitTriples, setEmitCallbacks, EmitCallbacks } from './tools/emit';
-import { normalizeTriples, normalizeAndDeduplicate } from './ingest/normalizer';
+import { keepLargestConnectedComponent, normalizeTriples } from './ingest/normalizer';
 import { chunkText, buildDocumentSummary } from './ingest/chunker';
 export { expandNode } from './agents/expander';
 
@@ -23,12 +23,26 @@ export async function orchestrate(
 
   console.log(`\n[orchestrator] run=${runId} stub=${config.stubMode}`);
 
+  const effectiveDocumentText = limitDocumentText(documentText);
+  if (effectiveDocumentText.length < documentText.length) {
+    await emitAgentEvent(
+      runId,
+      'MetaAgent',
+      'sampling',
+      `Large input detected; sampled ${effectiveDocumentText.length.toLocaleString()} of ${documentText.length.toLocaleString()} characters`
+    );
+  }
+
   await emitAgentEvent(runId, 'MetaAgent', 'chunking', `Splitting ${documentName} into chunks`);
 
-  const chunks = chunkText(documentText);
+  let chunks = chunkText(effectiveDocumentText);
+  if (chunks.length > config.maxChunks) {
+    await emitAgentEvent(runId, 'MetaAgent', 'sampling', `Using ${config.maxChunks} of ${chunks.length} chunks to keep extraction responsive`);
+    chunks = chunks.slice(0, config.maxChunks).map((chunk, index) => ({ ...chunk, index }));
+  }
   console.log(`[ingest] ${chunks.length} chunk(s)`);
 
-  const summary = buildDocumentSummary(documentText, config.metaSummaryChars);
+  const summary = buildDocumentSummary(effectiveDocumentText, config.metaSummaryChars);
 
   await emitAgentEvent(runId, 'MetaAgent', 'decomposing', 'Analyzing document structure');
   const { documentType, branches } = await decomposeDocument(summary);
@@ -54,9 +68,7 @@ export async function orchestrate(
     })),
   });
 
-  // Track already-emitted triple keys to avoid duplicates across branches
-  const emittedKeys = new Set<string>();
-  let totalNormalized = 0;
+  const allExtractedTriples: Awaited<ReturnType<typeof runSupervisor>> = [];
 
   // Process branches as they complete (not all at once)
   type BranchResult =
@@ -83,28 +95,32 @@ export async function orchestrate(
     if (result.status === 'fulfilled') {
       const { value: triples, branch } = result;
       console.log(`[orchestrator] branch "${branch.id}" completed with ${triples.length} triples`);
-
-      if (triples.length > 0) {
-        await emitAgentEvent(runId, 'MetaAgent', 'normalizing', `Deduplicating branch "${branch.label}"`);
-        const newTriples = normalizeAndDeduplicate(triples, emittedKeys);
-        console.log(`[orchestrator] branch "${branch.id}": ${triples.length} raw → ${newTriples.length} new triples`);
-        if (newTriples.length > 0) {
-          await emitTriples(runId, 'MetaAgent', newTriples);
-          totalNormalized += newTriples.length;
-        }
-      }
+      allExtractedTriples.push(...triples);
     } else {
       console.error(`[orchestrator] branch "${result.branch.id}" failed:`, result.reason);
     }
   }
 
-  console.log(`[orchestrator] total normalized triples: ${totalNormalized}`);
-  if (totalNormalized === 0) {
+  await emitAgentEvent(runId, 'MetaAgent', 'normalizing', `Deduplicating ${allExtractedTriples.length} extracted triple(s)`);
+  const normalized = normalizeTriples(allExtractedTriples);
+  const connected = keepLargestConnectedComponent(normalized);
+  if (connected.removed > 0) {
+    await emitAgentEvent(
+      runId,
+      'MetaAgent',
+      'filtered',
+      `Removed ${connected.removed} disconnected triple(s); emitting the largest connected graph component`
+    );
+  }
+
+  console.log(`[orchestrator] total normalized triples: ${normalized.length}, connected triples: ${connected.triples.length}`);
+  if (connected.triples.length === 0) {
     await emitAgentEvent(runId, 'MetaAgent', 'failed', 'Swarm extracted 0 triples; falling back to generic extraction');
     throw new Error('Swarm extracted 0 triples');
   }
 
-  await emitAgentEvent(runId, 'MetaAgent', 'completed', `Done. ${totalNormalized} triples in graph`);
+  await emitTriples(runId, 'MetaAgent', connected.triples);
+  await emitAgentEvent(runId, 'MetaAgent', 'completed', `Done. ${connected.triples.length} connected triples in graph`);
 }
 
 async function main() {
@@ -165,6 +181,13 @@ async function main() {
   }
 
   await orchestrate(runId, documentText, documentName);
+}
+
+function limitDocumentText(text: string): string {
+  if (text.length <= config.maxInputChars) return text;
+
+  const half = Math.floor(config.maxInputChars / 2);
+  return `${text.slice(0, half)}\n\n[...large document sampled...]\n\n${text.slice(-half)}`;
 }
 
 function readStdin(): Promise<string> {

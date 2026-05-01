@@ -61,3 +61,48 @@ export function normalizeAndDeduplicate(triples: Triple[], emittedKeys: Set<stri
 
   return newTriples;
 }
+
+export function keepLargestConnectedComponent(triples: Triple[]): { triples: Triple[]; removed: number } {
+  if (triples.length === 0) return { triples, removed: 0 };
+
+  const adjacency = new Map<string, Set<string>>();
+  const nodeIds = new Set<string>();
+
+  for (const triple of triples) {
+    nodeIds.add(triple.subject.id);
+    nodeIds.add(triple.object.id);
+    if (!adjacency.has(triple.subject.id)) adjacency.set(triple.subject.id, new Set());
+    if (!adjacency.has(triple.object.id)) adjacency.set(triple.object.id, new Set());
+    adjacency.get(triple.subject.id)?.add(triple.object.id);
+    adjacency.get(triple.object.id)?.add(triple.subject.id);
+  }
+
+  const components: string[][] = [];
+  const seen = new Set<string>();
+
+  for (const id of nodeIds) {
+    if (seen.has(id)) continue;
+    const queue = [id];
+    const component: string[] = [];
+    seen.add(id);
+
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      component.push(current);
+      for (const next of adjacency.get(current) ?? []) {
+        if (!seen.has(next)) {
+          seen.add(next);
+          queue.push(next);
+        }
+      }
+    }
+
+    components.push(component);
+  }
+
+  components.sort((a, b) => b.length - a.length);
+  const keepIds = new Set(components[0] ?? []);
+  const connectedTriples = triples.filter(triple => keepIds.has(triple.subject.id) && keepIds.has(triple.object.id));
+
+  return { triples: connectedTriples, removed: triples.length - connectedTriples.length };
+}

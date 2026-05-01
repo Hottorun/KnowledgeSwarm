@@ -14,4 +14,8 @@ export const config = {
   chunkWords: 600,
   chunkOverlapWords: 80,
   metaSummaryChars: 2000,
+  maxAnthropicConcurrency: Number(process.env.MAX_ANTHROPIC_CONCURRENCY || 1),
+  maxInputChars: Number(process.env.ORCHESTRATOR_MAX_INPUT_CHARS || 120_000),
+  maxChunks: Number(process.env.ORCHESTRATOR_MAX_CHUNKS || 12),
+  supervisorReviewEnabled: process.env.SUPERVISOR_REVIEW_ENABLED === 'true',
 };

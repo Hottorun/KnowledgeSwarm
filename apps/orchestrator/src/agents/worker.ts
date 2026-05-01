@@ -4,6 +4,7 @@ import { STUB_TRIPLES } from '../stubs/fixtures';
 import type { BranchPlan, DocumentChunk, Triple, WorkerOutput } from '../types';
 import type { SpecialistProfile } from './specialists';
 import { parseJsonArrayPropertyItems, parseJsonObject } from './json';
+import { withAnthropicLimit } from './anthropicLimiter';
 
 const client = new Anthropic({ apiKey: config.anthropicApiKey });
 
@@ -15,8 +16,9 @@ Output ONLY valid JSON — no markdown, no explanation:
 Rules:
 - Node ID format: type:slug (e.g. company:acme-corp, person:jane-doe, obligation:monthly-payment)
 - Extract ONLY facts explicitly stated in the text — never hallucinate
-- Extract at least 3 concrete triples when the chunk contains explicit relationships
-- Extract at most 8 triples per chunk
+- Extract at least 5 concrete triples when the chunk contains explicit relationships
+- Extract at most 10 triples per chunk
+- Prefer triples that connect entities back to the central company, organization, product, document, or topic in the chunk
 - Confidence: 0.9+ explicit | 0.7–0.9 strong implication | 0.5–0.7 inference — discard below 0.5
 - Use the exact quoted text as the source snippet
 - Keep JSON compact`;
@@ -44,12 +46,12 @@ Document chunk ${chunk.index}:
 
 ${chunk.text}`;
 
-  const response = await client.messages.create({
+  const response = await withAnthropicLimit(() => client.messages.create({
     model: config.workerModel,
-    max_tokens: 4096,
+    max_tokens: 1800,
     system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
     messages: [{ role: 'user', content: userMessage }],
-  });
+  }));
 
   const text = response.content.find(b => b.type === 'text')?.text ?? '';
   const output = parseWorkerOutput(text);

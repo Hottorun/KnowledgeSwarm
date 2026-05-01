@@ -3,6 +3,7 @@ import { config } from '../config';
 import { STUB_DECOMPOSITION } from '../stubs/fixtures';
 import type { DecompositionResult } from '../types';
 import { parseJsonObject } from './json';
+import { withAnthropicLimit } from './anthropicLimiter';
 
 const client = new Anthropic({ apiKey: config.anthropicApiKey });
 
@@ -34,12 +35,12 @@ export async function decomposeDocument(documentSummary: string): Promise<Decomp
     return STUB_DECOMPOSITION;
   }
 
-  const response = await client.messages.create({
+  const response = await withAnthropicLimit(() => client.messages.create({
     model: config.metaModel,
     max_tokens: 1024,
     system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
     messages: [{ role: 'user', content: `Document excerpt:\n\n${documentSummary}` }],
-  });
+  }));
 
   const text = response.content.find(b => b.type === 'text')?.text ?? '';
   return parseJsonObject<DecompositionResult>(text);
