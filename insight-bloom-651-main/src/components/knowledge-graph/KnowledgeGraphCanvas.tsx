@@ -630,14 +630,34 @@ function KnowledgeGraphCanvasInner() {
           ];
 
           void runLayoutAsync(allInputNodes, allEdges, userMovedRef.current).then(positions => {
-            const laidOut = allInputNodes.map(n => ({
-              ...n,
-              position: positions[n.id] ?? n.position,
-              style: { ...n.style, opacity: 1 },
-            })) as Node[];
-            const animated = assignAnimDelays(laidOut, allEdges);
-            setNodes(animated.nodes);
-            setEdges(animated.edges);
+            // MERGE into whatever's currently in React state — never overwrite
+            // from a (possibly-stale) snapshot. Two SSE bursts arriving close
+            // together can spawn overlapping worker calls; if worker B's debounce
+            // fired before worker A's setNodes was committed to nodesRef, B's
+            // snapshot would be empty and overwrite A's results.
+            setNodes(prev => {
+              const existingIds = new Set(prev.map(n => n.id));
+              const updated = prev.map(n =>
+                positions[n.id]
+                  ? { ...n, position: positions[n.id], style: { ...n.style, opacity: 1 } }
+                  : n,
+              );
+              const additions = pNodes
+                .filter(n => !existingIds.has(n.id))
+                .map(n => ({
+                  ...n,
+                  position: positions[n.id] ?? n.position,
+                  style: { ...n.style, opacity: 1 },
+                })) as Node[];
+              const merged = [...updated, ...additions];
+              return assignAnimDelays(merged, [...edgesRef.current, ...pEdges]).nodes;
+            });
+            setEdges(prev => {
+              const existingIds = new Set(prev.map(e => e.id));
+              const additions = pEdges.filter(e => !existingIds.has(e.id));
+              if (additions.length === 0) return prev;
+              return [...prev, ...additions];
+            });
             setIsProcessing(false);
 
             if (!hadCommittedNodes) {
@@ -649,7 +669,9 @@ function KnowledgeGraphCanvasInner() {
             }
           });
         } else {
-          // Expansion: re-layout committed nodes off the main thread
+          // Expansion: re-layout committed nodes off the main thread.
+          // Functional setState so concurrent worker callbacks never overwrite
+          // each other's progress.
           const currentNodes = nodesRef.current as GraphLayoutNode[];
           const currentEdges = edgesRef.current;
           void runLayoutAsync(currentNodes, currentEdges, userMovedRef.current).then(positions => {
