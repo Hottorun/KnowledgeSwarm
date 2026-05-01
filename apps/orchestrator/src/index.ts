@@ -2,8 +2,9 @@ import { config } from './config';
 import { decomposeDocument } from './agents/meta';
 import { runSupervisor } from './agents/supervisor';
 import { specialistForBranch } from './agents/specialists';
+import { repairDisconnectedGraph } from './agents/graphRepair';
 import { emitAgentEvent, emitTriples, setEmitCallbacks, EmitCallbacks } from './tools/emit';
-import { keepLargestConnectedComponent, normalizeTriples } from './ingest/normalizer';
+import { analyzeConnectedComponents, normalizeTriples } from './ingest/normalizer';
 import { chunkText, buildDocumentSummary } from './ingest/chunker';
 export { expandNode } from './agents/expander';
 
@@ -103,24 +104,47 @@ export async function orchestrate(
 
   await emitAgentEvent(runId, 'MetaAgent', 'normalizing', `Deduplicating ${allExtractedTriples.length} extracted triple(s)`);
   const normalized = normalizeTriples(allExtractedTriples);
-  const connected = keepLargestConnectedComponent(normalized);
-  if (connected.removed > 0) {
+  let finalTriples = normalized;
+  let components = analyzeConnectedComponents(finalTriples);
+
+  if (components.length > 1 && config.graphRepairEnabled) {
     await emitAgentEvent(
       runId,
-      'MetaAgent',
-      'filtered',
-      `Removed ${connected.removed} disconnected triple(s); emitting the largest connected graph component`
+      'ConnectivityAgent',
+      'connectivity.check',
+      `Graph has ${components.length} disconnected component(s); inferring bridge relationships`
+    );
+
+    const bridgeTriples = await repairDisconnectedGraph(finalTriples, components, documentName);
+    if (bridgeTriples.length > 0) {
+      finalTriples = normalizeTriples([...finalTriples, ...bridgeTriples]);
+      components = analyzeConnectedComponents(finalTriples);
+      await emitAgentEvent(
+        runId,
+        'ConnectivityAgent',
+        'connectivity.repaired',
+        `Added ${bridgeTriples.length} inferred bridge edge(s); graph now has ${components.length} component(s)`
+      );
+    }
+  }
+
+  if (components.length > 1) {
+    await emitAgentEvent(
+      runId,
+      'ConnectivityAgent',
+      'connectivity.warning',
+      `Graph still has ${components.length} disconnected component(s) after repair`
     );
   }
 
-  console.log(`[orchestrator] total normalized triples: ${normalized.length}, connected triples: ${connected.triples.length}`);
-  if (connected.triples.length === 0) {
+  console.log(`[orchestrator] total normalized triples: ${normalized.length}, final triples: ${finalTriples.length}, components: ${components.length}`);
+  if (finalTriples.length === 0) {
     await emitAgentEvent(runId, 'MetaAgent', 'failed', 'Swarm extracted 0 triples; falling back to generic extraction');
     throw new Error('Swarm extracted 0 triples');
   }
 
-  await emitTriples(runId, 'MetaAgent', connected.triples);
-  await emitAgentEvent(runId, 'MetaAgent', 'completed', `Done. ${connected.triples.length} connected triples in graph`);
+  await emitTriples(runId, 'MetaAgent', finalTriples);
+  await emitAgentEvent(runId, 'MetaAgent', 'completed', `Done. ${finalTriples.length} triples in graph (${components.length} component${components.length === 1 ? '' : 's'})`);
 }
 
 async function main() {

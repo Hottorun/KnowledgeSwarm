@@ -1,5 +1,10 @@
 import type { Triple } from '../types';
 
+export interface ConnectedComponent {
+  nodeIds: string[];
+  triples: Triple[];
+}
+
 // Normalize a label to a canonical slug for comparison
 function toSlug(label: string): string {
   return label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
@@ -65,6 +70,16 @@ export function normalizeAndDeduplicate(triples: Triple[], emittedKeys: Set<stri
 export function keepLargestConnectedComponent(triples: Triple[]): { triples: Triple[]; removed: number } {
   if (triples.length === 0) return { triples, removed: 0 };
 
+  const components = analyzeConnectedComponents(triples);
+  const keepIds = new Set(components[0]?.nodeIds ?? []);
+  const connectedTriples = triples.filter(triple => keepIds.has(triple.subject.id) && keepIds.has(triple.object.id));
+
+  return { triples: connectedTriples, removed: triples.length - connectedTriples.length };
+}
+
+export function analyzeConnectedComponents(triples: Triple[]): ConnectedComponent[] {
+  if (triples.length === 0) return [];
+
   const adjacency = new Map<string, Set<string>>();
   const nodeIds = new Set<string>();
 
@@ -77,7 +92,7 @@ export function keepLargestConnectedComponent(triples: Triple[]): { triples: Tri
     adjacency.get(triple.object.id)?.add(triple.subject.id);
   }
 
-  const components: string[][] = [];
+  const components: ConnectedComponent[] = [];
   const seen = new Set<string>();
 
   for (const id of nodeIds) {
@@ -97,12 +112,12 @@ export function keepLargestConnectedComponent(triples: Triple[]): { triples: Tri
       }
     }
 
-    components.push(component);
+    const componentIds = new Set(component);
+    components.push({
+      nodeIds: component,
+      triples: triples.filter(triple => componentIds.has(triple.subject.id) && componentIds.has(triple.object.id)),
+    });
   }
 
-  components.sort((a, b) => b.length - a.length);
-  const keepIds = new Set(components[0] ?? []);
-  const connectedTriples = triples.filter(triple => keepIds.has(triple.subject.id) && keepIds.has(triple.object.id));
-
-  return { triples: connectedTriples, removed: triples.length - connectedTriples.length };
+  return components.sort((a, b) => b.nodeIds.length - a.nodeIds.length);
 }

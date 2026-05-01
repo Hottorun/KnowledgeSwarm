@@ -1,0 +1,7 @@
+customer,segment,deal_value_usd,status,relationship_to_company
+Harbor Freight Logistics,logistics,3800000,active deployment,NovaCore Robotics sells AtlasPick to customer
+RheinHaus Manufacturing,manufacturing,2600000,pending export review,NovaCore Robotics sells AtlasPick to customer
+Singapore Parcel Network,parcel delivery,1900000,contract signed,NovaCore Robotics sells FleetMind to customer
+NorthBridge Foods,food distribution,1400000,awaiting grippers,NovaCore Robotics sells AtlasPick to customer
+MetroHealth Supply,medical logistics,900000,security review,NovaCore Robotics sells FleetMind to customer
+

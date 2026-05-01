@@ -18,4 +18,6 @@ export const config = {
   maxInputChars: Number(process.env.ORCHESTRATOR_MAX_INPUT_CHARS || 120_000),
   maxChunks: Number(process.env.ORCHESTRATOR_MAX_CHUNKS || 12),
   supervisorReviewEnabled: process.env.SUPERVISOR_REVIEW_ENABLED === 'true',
+  graphRepairEnabled: process.env.GRAPH_REPAIR_ENABLED !== 'false',
+  graphRepairMaxComponents: Number(process.env.GRAPH_REPAIR_MAX_COMPONENTS || 16),
 };

@@ -1,0 +1,9 @@
+order_id,customer,product,quantity,status,relationship_to_company
+SO-1042,Harbor Freight Logistics,AtlasPick robot arm,18,in production,NovaCore Robotics fulfills order
+SO-1043,RheinHaus Manufacturing,AtlasPick robot arm,12,pending export review,NovaCore Robotics fulfills order
+SO-1044,Singapore Parcel Network,FleetMind subscription,1,contract signed,NovaCore Robotics provides subscription
+SO-1045,NorthBridge Foods,AtlasPick robot arm,9,awaiting grippers,NovaCore Robotics fulfills order
+PO-7781,SensorWorks Inc,precision sensors,600,delayed,NovaCore Robotics purchases sensors
+PO-7782,PowerCell Korea,battery packs,240,on schedule,NovaCore Robotics purchases battery packs
+PO-7783,GripTech GmbH,robotic grippers,300,delayed,NovaCore Robotics purchases grippers
+
