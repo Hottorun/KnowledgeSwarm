@@ -1,6 +1,6 @@
 import { memo, useState } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
-import { motion } from 'framer-motion';
+import { AnimatePresence, motion } from 'framer-motion';
 
 export interface GraphNodeData {
   label: string;
@@ -9,6 +9,7 @@ export interface GraphNodeData {
   isHighlighted?: boolean;
   compact?: boolean;
   animDelay?: number;
+  isExpanding?: boolean;
   [key: string]: unknown;
 }
 
@@ -160,10 +161,37 @@ function GraphNodeComponent({ data, selected }: NodeProps) {
         style={{ position: 'absolute', inset: 0 }}
       >
 
+      {/* ── AI Working Blob ─────────────────────────────────── */}
+      <AnimatePresence>
+        {nodeData.isExpanding && (
+          <motion.div
+            key="expanding-blob"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.35, ease: 'easeOut' }}
+            style={{
+              position: 'absolute',
+              inset: 0,
+              zIndex: 0,
+              pointerEvents: 'none',
+              background: 'transparent',
+              borderRadius: dims.r,
+              boxShadow: [
+                `0 0 18px 8px ${dot.replace(')', ' / 50%)')}`,
+                `0 0 40px 18px ${dot.replace(')', ' / 30%)')}`,
+                `0 0 70px 30px ${dot.replace(')', ' / 15%)')}`,
+              ].join(', '),
+              animation: 'blob-pulse 2s ease-in-out infinite',
+            }}
+          />
+        )}
+      </AnimatePresence>
+
       {/* ── Compact dot ─────────────────────────────────────── */}
       <div
         style={{
-          position: 'absolute', inset: 0,
+          position: 'absolute', inset: 0, zIndex: 1,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           opacity: isCompact ? 1 : 0,
           transition: 'opacity 0.18s ease',
@@ -222,7 +250,7 @@ function GraphNodeComponent({ data, selected }: NodeProps) {
       {/* ── Expanded card ───────────────────────────────────── */}
       <motion.div
         style={{
-          position: 'absolute', inset: 0,
+          position: 'absolute', inset: 0, zIndex: 1,
           paddingLeft: dims.px, paddingRight: dims.px,
           paddingTop: dims.py, paddingBottom: dims.py,
           borderRadius: dims.r,

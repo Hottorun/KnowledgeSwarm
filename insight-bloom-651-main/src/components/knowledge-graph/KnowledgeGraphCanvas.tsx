@@ -303,6 +303,7 @@ function KnowledgeGraphCanvasInner() {
   const [selectedNodeRelationships, setSelectedNodeRelationships] = useState<NodeRelationship[]>([]);
   const [reasoningSteps, setReasoningSteps] = useState<AIReasoningStep[]>([]);
   const [runId, setRunId] = useState<string | null>(null);
+  const [expandingNodeId, setExpandingNodeId] = useState<string | null>(null);
   const reactFlowInstance = useReactFlow();
 
   const nodeTypes = useMemo(() => ({ graphNode: GraphNodeMemo }), []);
@@ -348,6 +349,16 @@ function KnowledgeGraphCanvasInner() {
 
   // Keep edgesRef in sync so the layout debounce can read current edges
   useEffect(() => { edgesRef.current = edges; }, [edges]);
+
+  // Sync expanding state into node data so GraphNode can render the blob animation
+  useEffect(() => {
+    setNodes(prev => prev.map(n => {
+      const wasExpanding = (n.data as GraphNodeData).isExpanding;
+      const shouldExpand = n.id === expandingNodeId;
+      if (wasExpanding === shouldExpand) return n;
+      return { ...n, data: { ...n.data, isExpanding: shouldExpand } };
+    }));
+  }, [expandingNodeId, setNodes]);
 
   // Expand nodes visible in the current viewport, compact those that have panned out.
   // Debounced so mid-gesture frames don't trigger unnecessary state updates.
@@ -991,6 +1002,7 @@ function KnowledgeGraphCanvasInner() {
       expansionDepthRef.current = depthAtClick;
       // Snapshot before any expansion mutates state so the user can undo it
       pushHistory();
+      setExpandingNodeId(selectedNodeId);
 
       try {
         const result = await apiExpandSubtree(runId, rootNode, contextNodes, contextEdges, question, expandCtx);
@@ -1016,6 +1028,7 @@ function KnowledgeGraphCanvasInner() {
         // Clear anchor so the next task starts clean (or initial-load events
         // route to the buffered path instead of trying to attach to this node).
         expansionAnchorRef.current = null;
+        setExpandingNodeId(null);
       }
     };
 
@@ -1031,7 +1044,7 @@ function KnowledgeGraphCanvasInner() {
     }
     expansionRunningRef.current = false;
     setQueuedExpansions(0);
-  }, [selectedNode, runId, nodes, edges, setNodes, setEdges, pushHistory]);
+  }, [selectedNode, runId, nodes, edges, setNodes, setEdges, pushHistory, setExpandingNodeId]);
 
   const handleNodeFocus = useCallback((nodeId: string) => {
     const node = nodes.find(n => n.id === nodeId);
@@ -1164,7 +1177,7 @@ function KnowledgeGraphCanvasInner() {
             relationships={selectedNodeRelationships}
             position={inputBoxPos}
             onAction={handleNodeAction}
-            onClose={() => { setSelectedNode(null); setInputBoxPos(null); setSelectedNodeRelationships([]); }}
+            onClose={() => { setSelectedNode(null); setInputBoxPos(null); setSelectedNodeRelationships([]); setHighlightedNodes(new Set()); setNodes(nds => nds.map(n => ({ ...n, selected: false }))); }}
             onDelete={(selectedNode.data as GraphNodeData).nodeType !== 'root' ? handleDeleteNode : undefined}
           />
         )}
