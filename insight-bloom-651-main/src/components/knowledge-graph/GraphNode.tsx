@@ -18,14 +18,50 @@ const typeStyles: Record<string, { fontClass: string; glow: string; dot: string 
   detail:   { fontClass: 'text-xs',               glow: 'var(--kg-glow-detail)',   dot: 'var(--kg-dot-detail)'   },
 };
 
-// Fixed dimensions per node type — React Flow always measures these values,
-// preventing node bounds from changing during the compact↔expanded transition.
-const nodeDims: Record<string, { w: number; h: number; dot: number; px: number; py: number; r: string }> = {
+export const nodeDims: Record<string, { w: number; h: number; dot: number; px: number; py: number; r: string }> = {
   root:     { w: 180, h: 64, dot: 36, px: 20, py: 16, r: '1rem'    },
   topic:    { w: 150, h: 52, dot: 28, px: 16, py: 12, r: '1rem'    },
   subtopic: { w: 130, h: 46, dot: 22, px: 12, py: 10, r: '0.75rem' },
   detail:   { w: 110, h: 40, dot: 18, px: 12, py:  8, r: '0.75rem' },
 };
+
+export const charWidths: Record<string, number> = {
+  root: 7.5, topic: 7, subtopic: 6.5, detail: 6,
+};
+
+export const LABEL_WRAP_AT = 25;
+
+export function calcNodeDims(
+  nodeType: string,
+  label: string,
+  description: string | undefined,
+  hasAccent: boolean,
+) {
+  const base = nodeDims[nodeType] ?? nodeDims.detail;
+  const charW = charWidths[nodeType] ?? 6;
+  const lineH = nodeType === 'root' || nodeType === 'topic' ? 20 : 18;
+
+  const labelLines = Math.ceil(label.length / LABEL_WRAP_AT);
+  const effectiveLineChars = Math.min(label.length, LABEL_WRAP_AT);
+
+  // Width: fit the longest line (capped at 25 chars), expand for short labels + optional badge
+  const badgeW = hasAccent && description ? description.length * 5.5 + 20 : 0;
+  const innerW = 16 + effectiveLineChars * charW + (badgeW > 0 ? 8 + badgeW : 0);
+  const w = Math.max(base.w, Math.ceil(innerW + 2 * base.px));
+
+  // Height: grow with label lines
+  let h = Math.max(base.h, base.py * 2 + labelLines * lineH);
+
+  // Description paragraph (no accent): grow height for wrapped lines
+  if (description && !hasAccent) {
+    const availW = w - 2 * base.px - 16;
+    const charsPerLine = Math.max(Math.floor(availW / 5.5), 1);
+    const extraLines = Math.max(0, Math.ceil(description.length / charsPerLine) - 1);
+    h += extraLines * 18;
+  }
+
+  return { ...base, w, h };
+}
 
 // Entity type → accent color (dot, glow, subtle bg tint)
 const entityAccent: Record<string, { dot: string; glow: string; tint: string }> = {
@@ -51,8 +87,8 @@ function getAccent(description?: string) {
 function GraphNodeComponent({ data, selected }: NodeProps) {
   const nodeData = data as unknown as GraphNodeData;
   const style = typeStyles[nodeData.nodeType] || typeStyles.detail;
-  const dims = nodeDims[nodeData.nodeType] || nodeDims.detail;
   const accent = getAccent(nodeData.description);
+  const dims = calcNodeDims(nodeData.nodeType, nodeData.label, nodeData.description, !!accent);
   const dot = accent?.dot ?? style.dot;
   const glow = accent?.glow ?? style.glow;
   const tint = accent?.tint;
@@ -174,9 +210,19 @@ function GraphNodeComponent({ data, selected }: NodeProps) {
           y: -1,
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <div style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0, background: dot }} />
-          <span className={style.fontClass} style={{ color: 'var(--foreground)', fontFamily: 'var(--font-display)' }}>
+        <div style={{ display: 'flex', alignItems: nodeData.label.length > LABEL_WRAP_AT ? 'flex-start' : 'center', gap: 8 }}>
+          <div style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0, background: dot, marginTop: nodeData.label.length > LABEL_WRAP_AT ? 3 : 0 }} />
+          <span
+            className={style.fontClass}
+            style={{
+              color: 'var(--foreground)',
+              fontFamily: 'var(--font-display)',
+              maxWidth: `${LABEL_WRAP_AT}ch`,
+              whiteSpace: 'normal',
+              wordBreak: 'break-word',
+              lineHeight: '1.4',
+            }}
+          >
             {nodeData.label}
           </span>
           {nodeData.description && accent && (

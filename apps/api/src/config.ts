@@ -7,6 +7,8 @@ function parseCorsOrigins(raw: string | undefined): string[] {
     'http://127.0.0.1:3000',
     'http://localhost:5173',
     'http://127.0.0.1:5173',
+    'http://localhost:8080',
+    'http://127.0.0.1:8080',
   ];
   const configured = raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : [];
   return Array.from(new Set([...defaults, ...configured]));

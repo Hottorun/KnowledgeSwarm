@@ -16,7 +16,7 @@ import '@xyflow/react/dist/style.css';
 import { AnimatePresence } from 'framer-motion';
 
 import { AnimatedBlob } from './AnimatedBlob';
-import { GraphNodeMemo, type GraphNodeData } from './GraphNode';
+import { GraphNodeMemo, calcNodeDims, type GraphNodeData } from './GraphNode';
 import { NodeInputBox } from './NodeInputBox';
 import { SidePanel } from './SidePanel';
 import { TopNav } from './TopNav';
@@ -33,8 +33,8 @@ type GraphLayoutNode = Node<GraphNodeData>;
 function forceDirectedLayout(layoutNodes: GraphLayoutNode[], layoutEdges: Edge[]): GraphLayoutNode[] {
   if (layoutNodes.length === 0) return layoutNodes;
 
-  const REPULSION = 18000;
-  const IDEAL_LENGTH = 210;
+  const REPULSION = 28000;
+  const IDEAL_LENGTH = 320;
   const STIFFNESS = 0.07;
   const DAMPING = 0.80;
   const ITERATIONS = 450;
@@ -116,23 +116,29 @@ function forceDirectedLayout(layoutNodes: GraphLayoutNode[], layoutEdges: Edge[]
 
 // ── Overlap resolver ──────────────────────────────────────────────────────────
 
-const NODE_DIMS: Record<string, { w: number; h: number }> = {
-  root:     { w: 180, h: 64 },
-  topic:    { w: 150, h: 52 },
-  subtopic: { w: 130, h: 46 },
-  detail:   { w: 110, h: 40 },
-};
-const NODE_GAP = 14;
+const NODE_GAP = 20;
+
+// Returns the actual rendered dimensions for a node, matching calcNodeDims in GraphNode.tsx.
+// We pass hasAccent=true so wide entity-type badges are included in the width estimate.
+function getNodeDims(n: GraphLayoutNode): { w: number; h: number } {
+  const d = n.data as GraphNodeData;
+  return calcNodeDims(d.nodeType, d.label, d.description, true);
+}
 
 function resolveOverlaps(layoutNodes: GraphLayoutNode[]): GraphLayoutNode[] {
   if (layoutNodes.length < 2) return layoutNodes;
 
   const pos = new Map(layoutNodes.map(n => [n.id, { x: n.position.x, y: n.position.y }]));
+  const dims = new Map(layoutNodes.map(n => [n.id, getNodeDims(n)]));
   const pinned = new Set(
     layoutNodes.filter(n => (n.data as GraphNodeData).nodeType === 'root').map(n => n.id)
   );
 
-  for (let iter = 0; iter < 1000; iter++) {
+  // Overshoot factor: push apart slightly more than the bare overlap so the
+  // iterative solver converges in fewer passes instead of oscillating at the boundary.
+  const OVERSHOOT = 1.05;
+
+  for (let iter = 0; iter < 2000; iter++) {
     let anyOverlap = false;
 
     for (let i = 0; i < layoutNodes.length; i++) {
@@ -141,8 +147,8 @@ function resolveOverlaps(layoutNodes: GraphLayoutNode[]): GraphLayoutNode[] {
         const b = layoutNodes[j];
         const pa = pos.get(a.id)!;
         const pb = pos.get(b.id)!;
-        const da = NODE_DIMS[(a.data as GraphNodeData).nodeType] ?? NODE_DIMS.detail;
-        const db = NODE_DIMS[(b.data as GraphNodeData).nodeType] ?? NODE_DIMS.detail;
+        const da = dims.get(a.id)!;
+        const db = dims.get(b.id)!;
 
         const overlapX = Math.min(pa.x + da.w + NODE_GAP, pb.x + db.w + NODE_GAP) - Math.max(pa.x - NODE_GAP, pb.x - NODE_GAP);
         const overlapY = Math.min(pa.y + da.h + NODE_GAP, pb.y + db.h + NODE_GAP) - Math.max(pa.y - NODE_GAP, pb.y - NODE_GAP);
@@ -158,16 +164,18 @@ function resolveOverlaps(layoutNodes: GraphLayoutNode[]): GraphLayoutNode[] {
 
         if (overlapX <= overlapY) {
           const dir = bCenterX >= aCenterX ? 1 : -1;
-          const half = overlapX / 2;
+          const push = overlapX * OVERSHOOT;
+          const half = push / 2;
           if (!aPinned && !bPinned) { pa.x -= dir * half; pb.x += dir * half; }
-          else if (aPinned) { pb.x += dir * overlapX; }
-          else              { pa.x -= dir * overlapX; }
+          else if (aPinned)         { pb.x += dir * push; }
+          else                      { pa.x -= dir * push; }
         } else {
           const dir = bCenterY >= aCenterY ? 1 : -1;
-          const half = overlapY / 2;
+          const push = overlapY * OVERSHOOT;
+          const half = push / 2;
           if (!aPinned && !bPinned) { pa.y -= dir * half; pb.y += dir * half; }
-          else if (aPinned) { pb.y += dir * overlapY; }
-          else              { pa.y -= dir * overlapY; }
+          else if (aPinned)         { pb.y += dir * push; }
+          else                      { pa.y -= dir * push; }
         }
       }
     }
@@ -256,12 +264,17 @@ function KnowledgeGraphCanvasInner() {
   const expansionChildIdxRef = useRef<number>(0);
   const nodesRef = useRef<Node[]>([]);
   const expansionDepthRef = useRef<number>(0);
+  const layoutDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const edgesRef = useRef<Edge[]>([]);
 
   useOnViewportChange({
     onChange: useCallback((vp: { x: number; y: number; zoom: number }) => {
       setViewport(vp);
     }, []),
   });
+
+  // Keep edgesRef in sync so the layout debounce can read current edges
+  useEffect(() => { edgesRef.current = edges; }, [edges]);
 
   // Expand nodes visible in the current viewport, compact those that have panned out.
   // Debounced so mid-gesture frames don't trigger unnecessary state updates.
@@ -400,6 +413,14 @@ function KnowledgeGraphCanvasInner() {
         } as GraphLayoutNode];
       });
 
+      // Debounced full layout — runs after the burst of node.created events settles.
+      // Uses force-directed layout (spring forces along edges pull connected nodes
+      // together, repulsion pushes unrelated ones apart) then resolves overlaps.
+      if (layoutDebounceRef.current) clearTimeout(layoutDebounceRef.current);
+      layoutDebounceRef.current = setTimeout(() => {
+        setNodes(prev => layout(prev as GraphLayoutNode[], edgesRef.current) as Node[]);
+      }, 600);
+
       if (anchor) {
         const bridgeEdgeId = `e-expand-${anchor.id}-${backendNode.id}`;
         setEdges(prev => prev.some(ex => ex.id === bridgeEdgeId) ? prev : [...prev, {
@@ -452,7 +473,10 @@ function KnowledgeGraphCanvasInner() {
   }, [assignSpiralPosition, assignChildPosition, setNodes, setEdges]);
 
   useEffect(() => {
-    return () => { eventSourceRef.current?.close(); };
+    return () => {
+      eventSourceRef.current?.close();
+      if (layoutDebounceRef.current) clearTimeout(layoutDebounceRef.current);
+    };
   }, []);
 
   useEffect(() => { nodesRef.current = nodes; }, [nodes]);
@@ -776,6 +800,36 @@ function KnowledgeGraphCanvasInner() {
     }
   }, [nodes, edges, reactFlowInstance]);
 
+  const handleLoadSample = useCallback(() => {
+    const sampleNodes: GraphLayoutNode[] = [
+      { id: 'n1', type: 'graphNode', position: { x: 0, y: 0 },     data: { label: 'AI',                                        nodeType: 'root',     description: undefined } },
+      { id: 'n2', type: 'graphNode', position: { x: 250, y: -80 },  data: { label: 'Machine Learning',                          nodeType: 'topic',    description: 'Topic' } },
+      { id: 'n3', type: 'graphNode', position: { x: 250, y: 80 },   data: { label: 'Natural Language Processing',               nodeType: 'topic',    description: 'Topic' } },
+      { id: 'n4', type: 'graphNode', position: { x: 500, y: -160 }, data: { label: 'Large Language Model Training',             nodeType: 'subtopic', description: 'Technology' } },
+      { id: 'n5', type: 'graphNode', position: { x: 500, y: -40 },  data: { label: 'Retrieval Augmented Generation System',     nodeType: 'subtopic', description: 'Technology' } },
+      { id: 'n6', type: 'graphNode', position: { x: 500, y: 80 },   data: { label: 'Transformer Architecture Design',           nodeType: 'subtopic', description: 'Concept' } },
+      { id: 'n7', type: 'graphNode', position: { x: 500, y: 200 },  data: { label: 'OpenAI',                                    nodeType: 'subtopic', description: 'Company' } },
+      { id: 'n8', type: 'graphNode', position: { x: 750, y: -200 }, data: { label: 'Gradient descent optimisation loop',        nodeType: 'detail',   description: 'Concept' } },
+      { id: 'n9', type: 'graphNode', position: { x: 750, y: -80 },  data: { label: 'Vector database',                          nodeType: 'detail',   description: 'Technology' } },
+      { id: 'n10',type: 'graphNode', position: { x: 750, y: 40 },   data: { label: 'Multi-head self-attention mechanism',       nodeType: 'detail',   description: 'Concept' } },
+    ];
+    const sampleEdges: Edge[] = [
+      { id: 'e1-2',  source: 'n1', target: 'n2',  label: 'includes',   type: 'floating' },
+      { id: 'e1-3',  source: 'n1', target: 'n3',  label: 'includes',   type: 'floating' },
+      { id: 'e2-4',  source: 'n2', target: 'n4',  label: 'uses',       type: 'floating' },
+      { id: 'e2-5',  source: 'n2', target: 'n5',  label: 'uses',       type: 'floating' },
+      { id: 'e3-6',  source: 'n3', target: 'n6',  label: 'built on',   type: 'floating' },
+      { id: 'e3-7',  source: 'n3', target: 'n7',  label: 'pioneered by', type: 'floating' },
+      { id: 'e4-8',  source: 'n4', target: 'n8',  label: 'requires',   type: 'floating' },
+      { id: 'e5-9',  source: 'n5', target: 'n9',  label: 'relies on',  type: 'floating' },
+      { id: 'e6-10', source: 'n6', target: 'n10', label: 'contains',   type: 'floating' },
+    ];
+    setNodes(sampleNodes);
+    setEdges(sampleEdges);
+    setIsEmpty(false);
+    setTimeout(() => reactFlowInstance.fitView({ padding: 0.2, duration: 400 }), 50);
+  }, [setNodes, setEdges, reactFlowInstance]);
+
   const handlePaneClick = useCallback(() => {
     setSelectedNode(null);
     setInputBoxPos(null);
@@ -811,6 +865,7 @@ function KnowledgeGraphCanvasInner() {
         connectionMode={connectionMode}
         onToggleFocus={() => setFocusMode(f => !f)}
         onToggleConnection={() => setConnectionMode(c => !c)}
+        onLoadSample={handleLoadSample}
       />
 
       <EdgeButton side="left" label="Contents" icon="📑" onClick={() => setLeftPanel(p => !p)} isActive={leftPanel} />
