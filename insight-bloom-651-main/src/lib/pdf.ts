@@ -1,17 +1,11 @@
 const API_BASE = import.meta.env?.VITE_API_BASE_URL ?? 'http://localhost:8787';
 
 async function extractPdfViaBackend(file: File): Promise<string> {
-  // btoa on large files risks stack overflow — use FileReader for safety
   const buffer = await file.arrayBuffer();
-  const bytes = new Uint8Array(buffer);
-  let binary = '';
-  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-  const base64 = btoa(binary);
-
   const res = await fetch(`${API_BASE}/ai/pdf-to-text`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ pdf: base64 }),
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: buffer,
   });
 
   if (!res.ok) {

@@ -366,9 +366,10 @@ function cleanEntity(value: string): string {
 
 router.post('/pdf-to-text', async (req: Request, res: Response) => {
   try {
-    const { pdf } = z.object({ pdf: z.string().min(1) }).parse(req.body);
-    const buffer = Buffer.from(pdf, 'base64');
-    const { text } = await extractPdfText(new Uint8Array(buffer), { mergePages: true });
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+      return res.status(400).json({ error: 'Send the PDF as application/octet-stream body' });
+    }
+    const { text } = await extractPdfText(new Uint8Array(req.body), { mergePages: true });
     const combined = Array.isArray(text) ? text.join('\n\n') : (text ?? '');
     if (!combined.trim()) return res.status(422).json({ error: 'PDF has no extractable text (may be image-based or scanned)' });
     return res.json({ text: combined });

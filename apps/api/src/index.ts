@@ -14,6 +14,7 @@ const app = express();
 
 app.use(cors({ origin: config.corsOrigins, credentials: true }));
 app.use(express.json({ limit: '10mb' }));
+app.use(express.raw({ type: 'application/octet-stream', limit: '50mb' }));
 
 app.use((req, _res, next) => {
   console.log(`${req.method} ${req.path}`);
