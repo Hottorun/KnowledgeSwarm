@@ -1,5 +1,6 @@
 import { RawExtractedTriple } from './ingestion';
 import { SearchResult, performSearch } from './search';
+import { config } from '../config';
 
 // Runtime key takes precedence over env so the user can set it via the API
 let runtimeOpenAIKey: string | null = null;
@@ -9,7 +10,7 @@ export function setRuntimeOpenAIKey(key: string): void {
 }
 
 export function getOpenAIKey(): string | null {
-  return runtimeOpenAIKey || process.env.OPENAI_API_KEY || null;
+  return runtimeOpenAIKey || config.openaiApiKey || null;
 }
 
 export function isOpenAIConfigured(): boolean {
