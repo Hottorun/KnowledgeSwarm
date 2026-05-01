@@ -436,18 +436,39 @@ function KnowledgeGraphCanvasInner() {
     source.addEventListener('edge.created', (e: MessageEvent) => {
       const envelope = JSON.parse(e.data) as SseEnvelope<{ edge: BackendEdge }>;
       const backendEdge = envelope.payload.edge;
-      const edgeId = `${backendEdge.source}:${backendEdge.predicate}:${backendEdge.target}`;
+      const anchor = expansionAnchorRef.current;
 
+      const sourceInGraph = nodesRef.current.some(n => n.id === backendEdge.source);
+      const targetInGraph = nodesRef.current.some(n => n.id === backendEdge.target);
+
+      // Skip edges where neither node exists in the graph — they're invisible and can't
+      // create hierarchy. Also skip when an anchor is active and this edge routes through
+      // a node other than the anchor (prevents off-target nodes like the root company
+      // from "claiming" children that belong to the clicked sub-node).
+      if (!sourceInGraph && !targetInGraph) return;
+      if (anchor && sourceInGraph && backendEdge.source !== anchor.id) return;
+
+      // Reposition a placeholder target now that its real source is known
       const newPos = assignChildPosition(backendEdge.source, backendEdge.target);
       if (newPos) {
         setNodes(prev => prev.map(n => n.id === backendEdge.target ? { ...n, position: newPos } : n));
       }
 
+      // When anchor is active and source doesn't exist in the graph (e.g. demo node IDs
+      // differ from backend-normalised IDs), route the edge from the anchor so the
+      // predicate label is visible on the correct connector.
+      const edgeSource = sourceInGraph ? backendEdge.source : (anchor?.id ?? backendEdge.source);
+      const edgeId = `${edgeSource}:${backendEdge.predicate}:${backendEdge.target}`;
+
       setEdges(prev => {
         if (prev.some(edge => edge.id === edgeId)) return prev;
-        return [...prev, {
+        // Replace the generic "expands" bridge edge with this semantically labelled one
+        const filtered = edgeSource === anchor?.id
+          ? prev.filter(ex => ex.id !== `e-expand-${anchor.id}-${backendEdge.target}`)
+          : prev;
+        return [...filtered, {
           id: edgeId,
-          source: backendEdge.source,
+          source: edgeSource,
           target: backendEdge.target,
           label: backendEdge.predicate,
           type: 'floating',

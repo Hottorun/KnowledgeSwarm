@@ -65,9 +65,16 @@ async function callOpenAI(
 
 const EXTRACTION_SYSTEM = `You are a knowledge graph extraction engine.
 Given a text chunk, extract ALL meaningful Subject-Predicate-Object relationships.
+
+LABEL QUALITY — STRICT:
+- Labels must be specific, human-readable, and descriptive — never snake_case or generic category words.
+- BAD: "sales_decline", "revenue_figure", "key_person", "market_share"
+- GOOD: "Revenue: $89.5B (Q1 2024)", "Tim Cook", "iPhone 15 Pro", "Global market share: 35%"
+- For data points, include the actual number or fact in the label (max 60 chars).
+
 Rules:
-- Subject and Object must be named entities (companies, people, products, markets, concepts, documents).
-- Predicate must be a short verb phrase (1-4 words, e.g. "acquired", "founded by", "competes with").
+- Subject and Object must be named entities (companies, people, products, markets, locations) OR specific descriptive data points.
+- Predicate must be a short verb phrase (1-4 words, e.g. "acquired", "founded by", "reported", "competes with").
 - subjectType and objectType must be one of: Company, Person, Market, Product, Document, Location, Concept, Entity.
 - confidence is 0.0–1.0 based on how explicit the relationship is in the text.
 - Omit trivial, vague, or duplicate relationships.
@@ -203,31 +210,44 @@ Output JSON: { "queries": [string, string, ...] }`;
   }
 
   // Step 3: AI synthesizes search results into new SPO triples
-  const synthesisPrompt = `You are a knowledge graph researcher. Use the web search results below to expand a knowledge graph branch.
+  const synthesisPrompt = `You are a knowledge graph researcher. Use the web search results below to expand a knowledge graph node.
 
-ROOT NODE: ${rootNode.label} (${rootNode.type})
+ACTIVE TARGET NODE (the node the user clicked — expand THIS node specifically):
+"${rootNode.label}" (type: ${rootNode.type})
 
-EXISTING NODES (strict deduplication — do NOT create new nodes for these):
+EXISTING NODES (strict deduplication — reuse exact labels for these, do NOT create duplicates):
 ${[rootNode.label, ...nodes.map(n => n.label)].join('\n')}
 
-EXISTING RELATIONSHIPS IN THIS BRANCH:
-${edgeList || 'No relationships yet.'}
+EXISTING RELATIONSHIPS:
+${edgeList || 'None yet.'}
 
-${question ? `USER QUESTION: ${question}` : `GOAL: Find new entities and relationships connected to "${rootNode.label}" and its branch.`}
+${question ? `USER QUESTION: ${question}` : `GOAL: Find specific facts, sub-topics, and connections directly about "${rootNode.label}".`}
 
 WEB SEARCH RESULTS:
 ${allWebContext.join('\n\n')}
 
-Extract meaningful new Subject-Predicate-Object relationships.
-Rules:
-- DEDUPLICATION: If subject or object semantically matches any name in the EXISTING NODES list above (case-insensitive), use the EXACT label string from that list. Never create a variant like "Apple Inc" if "Apple" already exists — reuse the exact existing label.
-- Prefer relationships connecting to existing branch nodes.
-- Include relationships between newly found entities too.
-- Predicate must be short (1–4 words).
-- subjectType/objectType: Company, Person, Market, Product, Location, Concept, Event, or Entity.
-- confidence: 0–1 based on how clearly the source states this.
+Extract new Subject-Predicate-Object relationships. ALL rules below are mandatory:
 
-Also write a short summary (2–4 sentences) of the most important new findings.
+HIERARCHY (most important rule):
+- EVERY new relationship MUST have "${rootNode.label}" as either the subject or the object.
+- Do NOT create triples between two third-party entities that don't directly involve "${rootNode.label}".
+- Example: if expanding "Tim Cook", write "Tim Cook --earned--> Annual compensation: $98M", NOT "Apple --has_CEO--> Tim Cook".
+
+LABEL QUALITY:
+- Labels must be specific, human-readable, and descriptive — never snake_case or generic category words.
+- BAD: "sales_decline", "revenue_figure", "market_position"
+- GOOD: "Revenue: $82.3B (Q3 2024)", "Led Vision Pro launch (2023)", "Holds 1M+ Apple shares"
+- For data points, write the actual fact as the label (max 60 chars).
+
+DEDUPLICATION:
+- If subject or object semantically matches any name in the EXISTING NODES list (case-insensitive), use the EXACT same label string from that list.
+
+OTHER:
+- Predicate: short verb phrase, 1–4 words.
+- subjectType/objectType: Company, Person, Market, Product, Location, Concept, Event, or Entity.
+- confidence: 0–1 based on how explicitly the source states this.
+
+Also write a 2–4 sentence summary of the most important new findings about "${rootNode.label}".
 
 Output JSON: {
   "summary": string,
