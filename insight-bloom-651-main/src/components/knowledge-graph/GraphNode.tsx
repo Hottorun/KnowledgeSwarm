@@ -14,21 +14,21 @@ export interface GraphNodeData {
 }
 
 const typeStyles: Record<string, { fontClass: string; glow: string; dot: string }> = {
-  root:     { fontClass: 'text-sm font-semibold', glow: 'var(--kg-glow-root)',     dot: 'var(--kg-dot-root)'     },
-  topic:    { fontClass: 'text-sm font-medium',   glow: 'var(--kg-glow-topic)',    dot: 'var(--kg-dot-topic)'    },
-  subtopic: { fontClass: 'text-xs font-medium',   glow: 'var(--kg-glow-subtopic)', dot: 'var(--kg-dot-subtopic)' },
-  detail:   { fontClass: 'text-xs',               glow: 'var(--kg-glow-detail)',   dot: 'var(--kg-dot-detail)'   },
+  root:     { fontClass: 'text-base font-semibold', glow: 'var(--kg-glow-root)',     dot: 'var(--kg-dot-root)'     },
+  topic:    { fontClass: 'text-sm font-medium',     glow: 'var(--kg-glow-topic)',    dot: 'var(--kg-dot-topic)'    },
+  subtopic: { fontClass: 'text-xs font-medium',     glow: 'var(--kg-glow-subtopic)', dot: 'var(--kg-dot-subtopic)' },
+  detail:   { fontClass: 'text-xs',                 glow: 'var(--kg-glow-detail)',   dot: 'var(--kg-dot-detail)'   },
 };
 
 export const nodeDims: Record<string, { w: number; h: number; dot: number; px: number; py: number; r: string }> = {
-  root:     { w: 180, h: 64, dot: 36, px: 20, py: 16, r: '1rem'    },
-  topic:    { w: 150, h: 52, dot: 28, px: 16, py: 12, r: '1rem'    },
+  root:     { w: 210, h: 76, dot: 40, px: 22, py: 18, r: '1rem'    },
+  topic:    { w: 175, h: 62, dot: 32, px: 18, py: 14, r: '1rem'    },
   subtopic: { w: 130, h: 46, dot: 22, px: 12, py: 10, r: '0.75rem' },
   detail:   { w: 110, h: 40, dot: 18, px: 12, py:  8, r: '0.75rem' },
 };
 
 export const charWidths: Record<string, number> = {
-  root: 7.5, topic: 7, subtopic: 6.5, detail: 6,
+  root: 8, topic: 7, subtopic: 6.5, detail: 6,
 };
 
 export const LABEL_WRAP_AT = 25;
@@ -45,7 +45,7 @@ export function calcNodeDims(
 ) {
   const base = nodeDims[nodeType] ?? nodeDims.detail;
   const charW = charWidths[nodeType] ?? 6;
-  const lineH = nodeType === 'root' || nodeType === 'topic' ? 20 : 18;
+  const lineH = nodeType === 'root' ? 24 : nodeType === 'topic' ? 20 : 18;
 
   const labelLines = Math.ceil(label.length / LABEL_WRAP_AT);
   const effectiveLineChars = Math.min(label.length, LABEL_WRAP_AT);
