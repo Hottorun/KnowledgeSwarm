@@ -192,6 +192,11 @@
   background-color: var(--kg-canvas) !important;
 }
 
+/* Smooth node repositioning — excluded during drag so the node tracks the cursor exactly */
+.react-flow__node:not(.dragging) {
+  transition: transform 0.55s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
 .react-flow__edge-path {
   stroke: var(--kg-edge) !important;
   stroke-width: 1.5 !important;
