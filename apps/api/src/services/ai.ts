@@ -73,13 +73,33 @@ LABEL QUALITY — STRICT:
 - GOOD: "Revenue: $89.5B (Q1 2024)", "Tim Cook", "iPhone 15 Pro", "Global market share: 35%"
 - For data points, include the actual number or fact in the label (max 60 chars).
 
+QUANTITATIVE DATA — NON-NEGOTIABLE:
+- If exact numbers are present in the text, copy them VERBATIM into the label and into exact_value/unit fields. NEVER round, truncate, or summarize a number.
+- If a number is ambiguous or missing, set exact_value to null and unit to null. Do NOT guess.
+- exact_value: the raw numeric value as a number (e.g. 89.5, not "89.5B"). Billions/millions belong in unit.
+- unit: the measurement denomination (e.g. "billion USD", "million EUR", "%", "employees", "years").
+- A label of "Revenue: ~$90B" when the source says "$89.5B" is a VIOLATION — output "$89.5B" exactly.
+
 Rules:
 - Subject and Object must be named entities (companies, people, products, markets, locations) OR specific descriptive data points.
 - Predicate must be a short verb phrase (1-4 words, e.g. "acquired", "founded by", "reported", "competes with").
 - subjectType and objectType must be one of: Company, Person, Market, Product, Document, Location, Concept, Entity.
 - confidence is 0.0–1.0 based on how explicit the relationship is in the text.
 - Omit trivial, vague, or duplicate relationships.
-Output ONLY valid JSON: { "triples": [ { "subject": string, "predicate": string, "object": string, "subjectType": string, "objectType": string, "confidence": number } ] }`;
+
+Output ONLY valid JSON:
+{
+  "triples": [{
+    "subject": string,
+    "predicate": string,
+    "object": string,
+    "subjectType": string,
+    "objectType": string,
+    "confidence": number,
+    "exact_value": number | null,
+    "unit": string | null
+  }]
+}`;
 
 export interface ExtractionResult {
   triples: RawExtractedTriple[];
@@ -98,21 +118,34 @@ export async function extractTriplesFromChunk(
         { role: 'system', content: EXTRACTION_SYSTEM },
         { role: 'user', content: `Document: ${documentName || 'unknown'}\n\nText:\n${chunkText}` },
       ],
-      { jsonMode: true }
+      { jsonMode: true, temperature: 0 }
     );
 
     const parsed = JSON.parse(raw) as { triples?: Array<Record<string, unknown>> };
     const triples: RawExtractedTriple[] = (parsed.triples || [])
       .filter(t => t.subject && t.predicate && t.object)
-      .map(t => ({
-        subject: String(t.subject),
-        predicate: String(t.predicate),
-        object: String(t.object),
-        subjectType: t.subjectType ? String(t.subjectType) : undefined,
-        objectType: t.objectType ? String(t.objectType) : undefined,
-        confidence: typeof t.confidence === 'number' ? t.confidence : undefined,
-        source: documentName ? { documentName } : undefined,
-      }));
+      .map(t => {
+        const exactValue = typeof t.exact_value === 'number' ? t.exact_value : null;
+        const unit = typeof t.unit === 'string' && t.unit ? t.unit : null;
+        // If structured numeric fields are present, verify the label carries the verbatim
+        // value. If the label is missing the raw number, reconstruct it.
+        let object = String(t.object);
+        if (exactValue !== null && unit !== null) {
+          const numStr = String(exactValue);
+          if (!object.includes(numStr)) {
+            object = `${object}: ${exactValue} ${unit}`.slice(0, 60);
+          }
+        }
+        return {
+          subject: String(t.subject),
+          predicate: String(t.predicate),
+          object,
+          subjectType: t.subjectType ? String(t.subjectType) : undefined,
+          objectType: t.objectType ? String(t.objectType) : undefined,
+          confidence: typeof t.confidence === 'number' ? t.confidence : undefined,
+          source: documentName ? { documentName } : undefined,
+        };
+      });
 
     return { triples, chunkIndex };
   } catch (err) {
@@ -186,11 +219,13 @@ function filterToConnectedTriples(
 
 // Internal types for the two-pass extraction architecture
 interface ExtractedItem {
-  id: string;       // temp ID: "new:<slug>"
+  id: string;            // temp ID: "new:<slug>"
   label: string;
   type: string;
   brief: string;
-  isCategory: boolean;  // grouping node — must connect to root
+  isCategory: boolean;   // grouping node — must connect to root
+  exact_value: number | null;  // verbatim numeric value when item is quantitative
+  unit: string | null;         // measurement unit (e.g. "billion USD", "%")
 }
 
 interface ItemConnection {
@@ -303,10 +338,24 @@ STRICT RULES:
 - Type must be one of: Company, Person, Product, Market, Technology, Location, Concept, Entity
 - Do NOT duplicate labels from the EXISTING list
 
+QUANTITATIVE DATA — NON-NEGOTIABLE:
+- If exact numbers are present in the research, copy them VERBATIM into the label AND into exact_value/unit fields. NEVER round, truncate, or summarize.
+- If a number is ambiguous, set exact_value to null and unit to null. Do NOT guess.
+- exact_value: the raw numeric portion as a JSON number (e.g. 89.5). Scale factors (billion/million) go into unit.
+- unit: the full denomination string (e.g. "billion USD", "million employees", "%", "years").
+- A label approximating "$90B" when the source says "$89.5B" is a violation — use "$89.5B" verbatim.
+
 Output JSON:
 {
   "summary": "2-3 sentence summary of key findings about the target",
-  "items": [{ "label": string, "type": string, "brief": string, "isCategory": boolean }]
+  "items": [{
+    "label": string,
+    "type": string,
+    "brief": string,
+    "isCategory": boolean,
+    "exact_value": number | null,
+    "unit": string | null
+  }]
 }`;
 
   const pass1User = `TARGET: "${rootNode.label}" (${rootNode.type}) — ${depthLabel}
@@ -322,7 +371,7 @@ ${allWebContext.slice(0, 24).join('\n\n')}`;
 
   const pass1Raw = await callOpenAI(
     [{ role: 'system', content: pass1System }, { role: 'user', content: pass1User }],
-    { model: 'gpt-4o-mini', jsonMode: true, temperature: 0.2 }
+    { model: 'gpt-4o-mini', jsonMode: true, temperature: 0 }
   );
 
   const pass1Parsed = JSON.parse(pass1Raw) as { summary?: string; items?: Array<Record<string, unknown>> };
@@ -330,13 +379,25 @@ ${allWebContext.slice(0, 24).join('\n\n')}`;
 
   const extractedItems: ExtractedItem[] = (pass1Parsed.items || [])
     .filter(i => i.label && i.type)
-    .map(i => ({
-      id: `new:${slugify(String(i.label))}`,
-      label: String(i.label).trim().slice(0, 60),
-      type: String(i.type || 'Entity'),
-      brief: String(i.brief || ''),
-      isCategory: Boolean(i.isCategory),
-    }));
+    .map(i => {
+      const exactValue = typeof i.exact_value === 'number' ? i.exact_value : null;
+      const unit = typeof i.unit === 'string' && i.unit ? i.unit : null;
+      let label = String(i.label).trim().slice(0, 60);
+      // If structured numeric fields are present and the label is missing the verbatim
+      // value, reconstruct it so the node accurately reflects the source data.
+      if (exactValue !== null && unit !== null && !label.includes(String(exactValue))) {
+        label = `${label}: ${exactValue} ${unit}`.slice(0, 60);
+      }
+      return {
+        id: `new:${slugify(label)}`,
+        label,
+        type: String(i.type || 'Entity'),
+        brief: String(i.brief || ''),
+        isCategory: Boolean(i.isCategory),
+        exact_value: exactValue,
+        unit,
+      };
+    });
 
   if (extractedItems.length === 0) {
     return { summary, newTriples: [], searchQueries, searchResultCount: allSearchResults.length };
