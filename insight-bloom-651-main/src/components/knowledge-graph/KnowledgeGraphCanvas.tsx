@@ -1274,10 +1274,12 @@ function KnowledgeGraphCanvasInner() {
         className="w-full h-full"
       >
         <Background variant={BackgroundVariant.Dots} gap={24} size={1} color="var(--border)" />
-        <Controls
-          showInteractive={false}
-          position="bottom-center"
-        />
+        {!isEmpty && (
+          <Controls
+            showInteractive={false}
+            position="bottom-center"
+          />
+        )}
       </ReactFlow>
 
       {/* Empty state blob */}
