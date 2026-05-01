@@ -229,6 +229,40 @@ function computeNodeDepth(nodeId: string, edgeList: Edge[]): number {
   return depth;
 }
 
+// BFS from root → assign animDelay (seconds) per node so center fades in first.
+// Total animation ≤ 2s: stepMs = min(300, 2000 / maxDepth).
+function assignAnimDelays(nodes: Node[], edges: Edge[]): Node[] {
+  const rootNode = nodes.find(n => (n.data as { nodeType?: string }).nodeType === 'root');
+  const depthMap = new Map<string, number>();
+
+  if (rootNode) {
+    const queue: [string, number][] = [[rootNode.id, 0]];
+    const visited = new Set<string>();
+    while (queue.length) {
+      const item = queue.shift()!;
+      const [id, depth] = item;
+      if (visited.has(id)) continue;
+      visited.add(id);
+      depthMap.set(id, depth);
+      edges.filter(e => e.source === id).forEach(e => {
+        if (!visited.has(e.target)) queue.push([e.target, depth + 1]);
+      });
+    }
+  }
+
+  const maxDepth = depthMap.size > 0 ? Math.max(...depthMap.values()) : 0;
+  // Nodes unreachable from root get the last wave
+  nodes.forEach(n => { if (!depthMap.has(n.id)) depthMap.set(n.id, maxDepth); });
+
+  const effectiveMax = Math.max(...depthMap.values(), 1);
+  const stepMs = Math.min(300, 2000 / effectiveMax);
+
+  return nodes.map(n => ({
+    ...n,
+    data: { ...n.data, animDelay: (depthMap.get(n.id) ?? 0) * stepMs / 1000 },
+  }));
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 function KnowledgeGraphCanvasInner() {
@@ -431,7 +465,7 @@ function KnowledgeGraphCanvasInner() {
             allEdges,
           ) as Node[];
 
-          setNodes(laidOut);
+          setNodes(assignAnimDelays(laidOut, allEdges));
           setEdges(allEdges);
           setIsProcessing(false);
 
@@ -918,7 +952,7 @@ function KnowledgeGraphCanvasInner() {
       { id: 'e5-9',  source: 'n5', target: 'n9',  label: 'relies on',  type: 'floating' },
       { id: 'e6-10', source: 'n6', target: 'n10', label: 'contains',   type: 'floating' },
     ];
-    setNodes(sampleNodes);
+    setNodes(assignAnimDelays(sampleNodes, sampleEdges));
     setEdges(sampleEdges);
     setIsEmpty(false);
     setTimeout(() => reactFlowInstance.fitView({ padding: 0.2, duration: 400 }), 50);

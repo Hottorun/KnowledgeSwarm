@@ -8,6 +8,7 @@ export interface GraphNodeData {
   nodeType: 'root' | 'topic' | 'subtopic' | 'detail';
   isHighlighted?: boolean;
   compact?: boolean;
+  animDelay?: number;
   [key: string]: unknown;
 }
 
@@ -126,6 +127,13 @@ function GraphNodeComponent({ data, selected }: NodeProps) {
       <Handle type="target" position={Position.Left}  id="left-t"  className="!bg-transparent !w-1 !h-1 !border-none !left-0 !top-1/2 !-translate-y-1/2" />
       <Handle type="target" position={Position.Right} id="right-t" className="!bg-transparent !w-1 !h-1 !border-none !right-0 !top-1/2 !-translate-y-1/2" />
 
+      <motion.div
+        initial={{ opacity: 0, scale: 0.78 }}
+        animate={{ opacity: 1, scale: 1 }}
+        transition={{ duration: 0.38, delay: nodeData.animDelay ?? 0, ease: [0.16, 1, 0.3, 1] }}
+        style={{ position: 'absolute', inset: 0 }}
+      >
+
       {/* ── Compact dot ─────────────────────────────────────── */}
       <div
         style={{
@@ -233,6 +241,8 @@ function GraphNodeComponent({ data, selected }: NodeProps) {
             </span>
           )}
         </div>
+      </motion.div>
+
       </motion.div>
 
       <Handle type="source" position={Position.Bottom} className="!bg-transparent !w-1 !h-1 !border-none !bottom-0 !left-1/2 !-translate-x-1/2" />
