@@ -63,35 +63,30 @@ export function calcNodeDims(
   return { ...base, w, h };
 }
 
-// Entity type → accent color (dot, glow, subtle bg tint)
-const entityAccent: Record<string, { dot: string; glow: string; tint: string }> = {
-  Company:      { dot: '#3b82f6', glow: 'rgba(59,130,246,0.28)',  tint: 'rgba(59,130,246,0.07)' },
-  Organization: { dot: '#6366f1', glow: 'rgba(99,102,241,0.28)',  tint: 'rgba(99,102,241,0.07)' },
-  Person:       { dot: '#22c55e', glow: 'rgba(34,197,94,0.28)',   tint: 'rgba(34,197,94,0.07)'  },
-  Market:       { dot: '#f97316', glow: 'rgba(249,115,22,0.28)',  tint: 'rgba(249,115,22,0.07)' },
-  Technology:   { dot: '#a855f7', glow: 'rgba(168,85,247,0.28)',  tint: 'rgba(168,85,247,0.07)' },
-  Product:      { dot: '#ec4899', glow: 'rgba(236,72,153,0.28)',  tint: 'rgba(236,72,153,0.07)' },
-  Event:        { dot: '#eab308', glow: 'rgba(234,179,8,0.28)',   tint: 'rgba(234,179,8,0.07)'  },
-  Location:     { dot: '#14b8a6', glow: 'rgba(20,184,166,0.28)',  tint: 'rgba(20,184,166,0.07)' },
-  Regulation:   { dot: '#ef4444', glow: 'rgba(239,68,68,0.28)',   tint: 'rgba(239,68,68,0.07)'  },
-  Concept:      { dot: '#94a3b8', glow: 'rgba(148,163,184,0.28)', tint: 'rgba(148,163,184,0.07)' },
-  Topic:        { dot: '#94a3b8', glow: 'rgba(148,163,184,0.28)', tint: 'rgba(148,163,184,0.07)' },
+// Monochrome dot intensity by depth — subtle hierarchy without rainbow noise.
+const depthDot: Record<string, string> = {
+  root:     'oklch(0.20 0.02 260)',  // near-black
+  topic:    'oklch(0.38 0.02 260)',
+  subtopic: 'oklch(0.55 0.02 260)',
+  detail:   'oklch(0.70 0.02 260)',  // light grey
 };
 
-function getAccent(description?: string) {
-  if (!description) return null;
-  const key = Object.keys(entityAccent).find(k => description.toLowerCase().includes(k.toLowerCase()));
-  return key ? entityAccent[key] : null;
-}
+const depthGlow: Record<string, string> = {
+  root:     'oklch(0.20 0.02 260 / 18%)',
+  topic:    'oklch(0.38 0.02 260 / 14%)',
+  subtopic: 'oklch(0.55 0.02 260 / 10%)',
+  detail:   'oklch(0.70 0.02 260 / 8%)',
+};
 
 function GraphNodeComponent({ data, selected }: NodeProps) {
   const nodeData = data as unknown as GraphNodeData;
   const style = typeStyles[nodeData.nodeType] || typeStyles.detail;
-  const accent = getAccent(nodeData.description);
-  const dims = calcNodeDims(nodeData.nodeType, nodeData.label, nodeData.description, !!accent);
-  const dot = accent?.dot ?? style.dot;
-  const glow = accent?.glow ?? style.glow;
-  const tint = accent?.tint;
+  // Show entity-type as a subtle text badge (no color); pass hasAccent=true to width calc
+  // so badge text fits without truncation.
+  const hasBadge = !!nodeData.description;
+  const dims = calcNodeDims(nodeData.nodeType, nodeData.label, nodeData.description, hasBadge);
+  const dot = depthDot[nodeData.nodeType] ?? depthDot.detail;
+  const glow = depthGlow[nodeData.nodeType] ?? depthGlow.detail;
   const isHighlighted = nodeData.isHighlighted === true;
   const isCompact = nodeData.compact === true;
   const [hovered, setHovered] = useState(false);
@@ -197,7 +192,7 @@ function GraphNodeComponent({ data, selected }: NodeProps) {
           paddingLeft: dims.px, paddingRight: dims.px,
           paddingTop: dims.py, paddingBottom: dims.py,
           borderRadius: dims.r,
-          background: tint ? `linear-gradient(135deg, ${tint}, var(--kg-node-bg))` : 'var(--kg-node-bg)',
+          background: 'var(--kg-node-bg)',
           border: `1.5px solid ${cardBorder}`,
           boxShadow: cardShadow,
           opacity: isCompact ? 0 : 1,
@@ -225,20 +220,19 @@ function GraphNodeComponent({ data, selected }: NodeProps) {
           >
             {nodeData.label}
           </span>
-          {nodeData.description && accent && (
+          {nodeData.description && (
             <span
-              className="ml-auto text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0"
-              style={{ background: `${dot}22`, color: dot }}
+              className="ml-auto text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 uppercase tracking-wide"
+              style={{
+                background: 'var(--muted)',
+                color: 'var(--muted-foreground)',
+                letterSpacing: '0.04em',
+              }}
             >
               {nodeData.description}
             </span>
           )}
         </div>
-        {nodeData.description && !accent && (
-          <p className="mt-1 text-xs leading-relaxed" style={{ color: 'var(--muted-foreground)' }}>
-            {nodeData.description}
-          </p>
-        )}
       </motion.div>
 
       <Handle type="source" position={Position.Bottom} className="!bg-transparent !w-1 !h-1 !border-none !bottom-0 !left-1/2 !-translate-x-1/2" />

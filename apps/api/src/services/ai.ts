@@ -161,7 +161,14 @@ export async function expandSubtree(input: ExpandSubtreeInput): Promise<ExpandSu
     : rootNode.label;
 
   // Depth-appropriate instruction for query generation
-  const depthLabel = graphDepth === 0 ? 'root entity' : graphDepth === 1 ? 'Level 1 pillar' : graphDepth === 2 ? 'Level 2 subdivision' : `Level ${graphDepth} detail`;
+  const depthLabel =
+    graphDepth === 0 ? 'root entity'
+    : graphDepth === 1 ? 'Level 1 pillar'
+    : graphDepth === 2 ? 'Level 2 subdivision'
+    : graphDepth === 3 ? 'Level 3 specific entity/fact'
+    : `Level ${graphDepth} fine-grained detail`;
+
+  const userQuestionDriven = !!question?.trim();
 
   // Step 1: Ask the AI to generate focused web search queries
   const queryGenPrompt = `You are a research planner for a structured knowledge graph.
@@ -173,15 +180,17 @@ LINEAGE: ${lineagePath}
 ${parentNode ? `PARENT: "${parentNode.label}"` : ''}
 ${question ? `USER QUESTION: ${question}` : ''}
 
-ABSTRACTION LEVEL GUIDANCE:
-${graphDepth <= 1
-    ? `Level ${graphDepth}: search for high-level CATEGORIES and PILLARS of "${rootNode.label}" — not specific statistics or names yet.`
+${userQuestionDriven
+  ? `The user's question OVERRIDES default abstraction. Search exactly for what the question asks about, scoped to "${rootNode.label}".`
+  : graphDepth <= 1
+    ? `Level ${graphDepth}: search for the broadest CATEGORIES and PILLARS of "${rootNode.label}" — e.g. "main business divisions of X", "core areas of X". NO statistics, NO leaf facts, NO named individuals.`
     : graphDepth === 2
-      ? `Level 2: search for named SUB-DIVISIONS and key entities within "${rootNode.label}".`
-      : `Level ${graphDepth}: search for SPECIFIC FACTS, statistics, names, and data points about "${rootNode.label}" under "${parentNode?.label ?? 'its parent'}".`
-  }
+      ? `Level 2: search for named SUB-DIVISIONS, entities, and key components within "${rootNode.label}".`
+      : graphDepth === 3
+        ? `Level 3: search for SPECIFIC FACTS, statistics, individual names, products, and data points about "${rootNode.label}".`
+        : `Level ${graphDepth}: drill DEEPER into "${rootNode.label}" — micro-facts, granular attributes, dates, exact figures, related sub-properties. Stay scoped to "${rootNode.label}" within its lineage.`}
 
-Generate 2–3 specific, distinct web search queries that target this abstraction level.
+Generate 2–3 specific, distinct web search queries that target this level.
 Output JSON: { "queries": [string, string, ...] }`;
 
   const queryRaw = await callOpenAI(
@@ -223,23 +232,33 @@ Output JSON: { "queries": [string, string, ...] }`;
   // Step 3: AI synthesizes search results into new SPO triples using the 4-rule protocol
   const allExistingLabels = [rootNode.label, ...nodes.map(n => n.label)];
 
-  const depthRule = graphDepth <= 1
-    ? `RULE 1 — BREADTH-FIRST ABSTRACTION (Level ${graphDepth}):
-You MUST generate broad, abstract CATEGORY nodes — NOT leaf-level facts.
-GOOD labels at this level: "Finances", "Product Lines", "Corporate Leadership", "Market Competition"
-BAD labels at this level: "$4 trillion market cap", "Tim Cook is 62", specific dates or raw statistics
-Only abstract organisational categories, pillars, and high-level themes are allowed here.`
-    : graphDepth === 2
-      ? `RULE 1 — BREADTH-FIRST ABSTRACTION (Level 2):
-Generate named SUB-DIVISIONS and key entities within "${rootNode.label}". Named entities (people, products, markets) are OK.
-Avoid raw statistics and highly specific data points — save those for deeper levels.`
-      : `RULE 1 — SPECIFICITY UNLOCKED (Level ${graphDepth}+):
+  const depthRule = userQuestionDriven
+    ? `RULE 1 — QUESTION-DRIVEN (user override active):
+The user's question takes priority over abstraction defaults. Answer it directly with whatever specificity the question demands.
+Still: NO snake_case labels, NO vague category words. Every label must be a specific, human-readable phrase or fact (max 60 chars).`
+    : graphDepth <= 1
+      ? `RULE 1 — BREADTH-FIRST ABSTRACTION (Level ${graphDepth}) — STRICT:
+You MUST generate ONLY broad, abstract CATEGORY nodes. Leaf-level facts are FORBIDDEN at this level.
+GOOD: "Finances", "Product Lines", "Corporate Leadership", "Market Competition", "Brand Identity", "Manufacturing"
+BAD (will be REJECTED): "$4 trillion market cap", "Tim Cook is 62", "iPhone 15 Pro", any number, any specific date, any individual person's name, any product name.
+If you cannot think of an abstract category, output FEWER nodes — never substitute a leaf fact.`
+      : graphDepth === 2
+        ? `RULE 1 — NAMED SUB-DIVISIONS (Level 2):
+Generate named SUB-DIVISIONS and key entities within "${rootNode.label}". Named entities (people, products, markets, departments) are OK.
+Still avoid raw statistics, exact figures, and dates — save those for deeper levels.`
+        : graphDepth === 3
+          ? `RULE 1 — SPECIFICITY UNLOCKED (Level 3):
 You may now include specific facts, statistics, exact names, and data points.
 GOOD: "Revenue: $82.3B (Q3 2024)", "Led Vision Pro launch (2023)", "Holds 1M+ Apple shares"
 BAD: still forbidden: snake_case ("sales_decline"), generic categories ("revenue_figure").
+Max 60 characters per label.`
+          : `RULE 1 — DEEP DRILLDOWN (Level ${graphDepth}):
+You are deep in the graph — go MORE granular, not less. Atomic facts, micro-attributes, exact dates, unit-level details.
+GOOD: "Released Sept 12, 2023", "Battery: 3,279 mAh", "Manufactured at Foxconn Zhengzhou"
+BAD: anything generic. If you can't find truly atomic facts, return fewer nodes rather than padding with vague ones.
 Max 60 characters per label.`;
 
-  const synthesisPrompt = `You are a structured Knowledge Graph Architect. Apply ALL four rules below strictly.
+  const synthesisPrompt = `You are a structured Knowledge Graph Architect. Apply ALL rules below strictly.
 
 ════════════════════════════════════════
 TARGET NODE: "${rootNode.label}" (${rootNode.type})
@@ -279,9 +298,22 @@ RULE 3 — HIERARCHICAL CONTEXT:
 • Do NOT revert to generic facts about the parent entity "${parentNode?.label ?? 'root'}".
 • Example: expanding "Corporate Leadership" under "Apple Inc" → generate "Board of Directors", "Executive Team", "Leadership History" — NOT "Apple Revenue" or "iPhone Sales".
 
-RULE 4 — DIRECT CONNECTION:
-• Every new relationship MUST have "${rootNode.label}" as either subject or object.
-• Do NOT generate triples between two third-party entities.
+RULE 4 — REACHABLE FROM ROOT (multi-hop chains allowed):
+Every new node must be reachable from "${rootNode.label}" through a chain of new triples.
+Single-hop is preferred, but MULTI-HOP CHAINS rooted at "${rootNode.label}" are allowed and ENCOURAGED when the user's question targets a property of a sub-entity.
+
+Example: question = "age of the founder" on rootNode "Acne Studios"
+  WRONG (single-hop, attaches age to wrong entity):
+    Acne Studios --[founder_age]--> "55"
+  CORRECT (multi-hop chain):
+    Acne Studios --[founded_by]--> "Jonny Johansson"
+    "Jonny Johansson" --[age]--> "57"
+
+Rules for chains:
+• At least one triple in the chain MUST have "${rootNode.label}" as subject.
+• Every other new node must be transitively connected to "${rootNode.label}" via the new triples you generate.
+• Do NOT generate disconnected triples between two unrelated third-party entities.
+• If the user's question implies "X of Y of ${rootNode.label}", you MUST create the intermediate "Y" node first, then attach "X" to "Y".
 
 Also write a 2–3 sentence summary of the most important new findings specifically about "${rootNode.label}".
 
