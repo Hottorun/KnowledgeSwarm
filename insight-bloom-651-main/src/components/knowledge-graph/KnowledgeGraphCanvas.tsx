@@ -896,6 +896,11 @@ function KnowledgeGraphCanvasInner() {
   }, [connectRunStream, setNodes, setEdges]);
 
   const handleNodeClick = useCallback((_: React.MouseEvent, node: Node) => {
+    // Neighbor-only navigation: clicking a node makes it the new focal point.
+    // The next render unmounts whatever's no longer in the new node's 1-hop
+    // neighborhood and mounts the new neighbors. Triggers a refit afterwards.
+    setActiveNodeId(node.id);
+    needsInitialFitRef.current = true;
     setSelectedNode(node);
     const childIds = new Set(
       (() => {
@@ -1321,6 +1326,8 @@ function KnowledgeGraphCanvasInner() {
   }, [selectedNode, runId, nodes, edges, setNodes, setEdges, pushHistory, setExpandingNodeId]);
 
   const handleNodeFocus = useCallback((nodeId: string) => {
+    setActiveNodeId(nodeId);
+    needsInitialFitRef.current = true;
     const node = nodes.find(n => n.id === nodeId);
     if (node && reactFlowInstance) {
       const ids = new Set<string>([nodeId]);
@@ -1556,10 +1563,51 @@ function KnowledgeGraphCanvasInner() {
     }));
   }, [nodes, edges, highlightedNodes, aiHighlightedNodes, expandedSubtree, pinnedExpansion]);
 
-  // Defer the array passed to React Flow so React can interrupt the (potentially
-  // expensive) paint of large graphs to keep the UI responsive to user input.
-  const deferredNodes = useDeferredValue(nodesWithHighlight);
-  const deferredEdges = useDeferredValue(edges);
+  // Neighbor-only rendering: only the active node + its 1-hop neighbors are
+  // mounted in React Flow at any time. The full nodes/edges arrays stay in
+  // state (side panel, search, expansion all read from them) — we just filter
+  // at render time so the DOM never holds more than ~10 GraphNode instances.
+  const [activeNodeId, setActiveNodeId] = useState<string | null>(null);
+
+  // Auto-focus the root once the first batch lands
+  useEffect(() => {
+    if (activeNodeId !== null) return;
+    const root = nodes.find(n => (n.data as GraphNodeData).nodeType === 'root');
+    if (root) setActiveNodeId(root.id);
+  }, [activeNodeId, nodes]);
+
+  // If the active node disappears (undo, deletion), fall back to root
+  useEffect(() => {
+    if (activeNodeId && !nodes.some(n => n.id === activeNodeId)) {
+      const root = nodes.find(n => (n.data as GraphNodeData).nodeType === 'root');
+      setActiveNodeId(root?.id ?? null);
+    }
+  }, [activeNodeId, nodes]);
+
+  const neighborhoodIds = useMemo(() => {
+    if (!activeNodeId) return new Set<string>();
+    const ids = new Set<string>([activeNodeId]);
+    for (const e of edges) {
+      if (e.source === activeNodeId) ids.add(e.target);
+      else if (e.target === activeNodeId) ids.add(e.source);
+    }
+    return ids;
+  }, [activeNodeId, edges]);
+
+  const visibleNodes = useMemo(
+    () => nodesWithHighlight.filter(n => neighborhoodIds.has(n.id)),
+    [nodesWithHighlight, neighborhoodIds],
+  );
+
+  const visibleEdges = useMemo(
+    () => edges.filter(e => neighborhoodIds.has(e.source) && neighborhoodIds.has(e.target)),
+    [edges, neighborhoodIds],
+  );
+
+  // Defer the (already-filtered, small) array passed to React Flow so React
+  // can interrupt the paint to keep the UI responsive during rapid navigation.
+  const deferredNodes = useDeferredValue(visibleNodes);
+  const deferredEdges = useDeferredValue(visibleEdges);
 
   // Initial fitView must run AFTER React Flow has actually mounted+measured the
   // deferred nodes — calling fitView from inside the layout debounce or rAF
