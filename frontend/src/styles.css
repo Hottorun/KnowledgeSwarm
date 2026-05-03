@@ -1,11 +1,9 @@
 @import "tailwindcss" source(none);
-@source "../src";
 @import "tw-animate-css";
 
-@custom-variant dark (&:is(.dark *));
+@source "../src";
 
-/* ── Google Fonts ── */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap');
+@custom-variant dark (&:is(.dark *));
 
 /*
  * Design system definition.
@@ -185,45 +183,6 @@
   h1, h2, h3, h4, h5, h6 {
     font-family: var(--font-display);
   }
-}
-
-/* React Flow overrides */
-.react-flow__background {
-  background-color: var(--kg-canvas) !important;
-}
-
-/* Smooth node repositioning — excluded during drag so the node tracks the cursor exactly */
-.react-flow__node:not(.dragging) {
-  transition: transform 0.55s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.react-flow__edge-path {
-  stroke: var(--kg-edge) !important;
-  stroke-width: 1.5 !important;
-}
-
-.react-flow__controls {
-  border-radius: 12px !important;
-  border: 1px solid var(--border) !important;
-  box-shadow: var(--kg-shadow-md) !important;
-  overflow: hidden;
-  display: flex !important;
-  flex-direction: row !important;
-}
-
-.react-flow__controls-button {
-  background: var(--kg-node-bg) !important;
-  border-bottom: none !important;
-  border-right: 1px solid var(--border) !important;
-  fill: var(--muted-foreground) !important;
-}
-
-.react-flow__controls-button:last-child {
-  border-right: none !important;
-}
-
-.react-flow__controls-button:hover {
-  background: var(--accent) !important;
 }
 
 /* Blob animation */

@@ -7,17 +7,67 @@ interface QueryBoxProps {
   answer: string | null;
   newNodesCount: number;
   onDismissAnswer: () => void;
+  activeScopeLabel?: string;
+  activeScopeType?: string;
 }
 
-export function QueryBox({ onQuery, isQuerying, answer, newNodesCount, onDismissAnswer }: QueryBoxProps) {
+const shortcuts = [
+  {
+    label: 'Find connections',
+    prompt: (scope: string) => `Find more connections for ${scope}. Use existing graph context first. Identify related documents, entities, risks, and unexplored links. Only use web search if local graph/files are insufficient.`,
+  },
+  {
+    label: 'Find risks',
+    prompt: (scope: string) => `Find risks, obligations, dependencies, and open questions for ${scope}. Add supported connections back to existing graph nodes where possible.`,
+  },
+  {
+    label: 'Summarize branch',
+    prompt: (scope: string) => `Summarize ${scope}. Include key facts, documents, entities, risks, opportunities, and source-backed open questions.`,
+  },
+  {
+    label: 'Compare docs',
+    prompt: (scope: string) => `Compare documents related to ${scope}. Find overlaps, contradictions, shared entities, and missing connections between documents.`,
+  },
+  {
+    label: 'Key people',
+    prompt: (scope: string) => `Find key people, roles, reporting lines, responsibilities, and people-related risks for ${scope}. Connect people to documents and business areas.`,
+  },
+  {
+    label: 'Financial signals',
+    prompt: (scope: string) => `Find financial signals for ${scope}, including revenue, costs, payments, margins, forecasts, exposure, and dated financial facts.`,
+  },
+  {
+    label: 'Legal obligations',
+    prompt: (scope: string) => `Find legal obligations for ${scope}, including contracts, parties, jurisdiction, confidentiality, termination, compliance, and licensing relationships.`,
+  },
+];
+
+export function QueryBox({
+  onQuery,
+  isQuerying,
+  answer,
+  newNodesCount,
+  onDismissAnswer,
+  activeScopeLabel,
+  activeScopeType,
+}: QueryBoxProps) {
   const [value, setValue] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
+  const scope = activeScopeLabel
+    ? `the active ${activeScopeType ? activeScopeType.toLowerCase() : 'node'} "${activeScopeLabel}"`
+    : 'the current graph';
 
   const handleSubmit = () => {
     const q = value.trim();
     if (!q || isQuerying) return;
     setValue('');
     onQuery(q);
+  };
+
+  const handleShortcut = (prompt: string) => {
+    if (isQuerying) return;
+    setValue('');
+    onQuery(prompt);
   };
 
   // Focus input on mount
@@ -83,6 +133,26 @@ export function QueryBox({ onQuery, isQuerying, answer, newNodesCount, onDismiss
           </motion.div>
         )}
       </AnimatePresence>
+
+      <div className="flex w-full flex-wrap items-center justify-center gap-1.5">
+        {shortcuts.slice(0, activeScopeLabel ? 7 : 4).map(shortcut => (
+          <button
+            key={shortcut.label}
+            type="button"
+            onClick={() => handleShortcut(shortcut.prompt(scope))}
+            disabled={isQuerying}
+            className="rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors disabled:opacity-40 hover:bg-accent"
+            style={{
+              background: 'var(--kg-node-bg)',
+              border: '1px solid var(--kg-node-border)',
+              color: 'var(--muted-foreground)',
+              boxShadow: 'var(--kg-shadow-sm)',
+            }}
+          >
+            {shortcut.label}
+          </button>
+        ))}
+      </div>
 
       {/* Input box */}
       <div

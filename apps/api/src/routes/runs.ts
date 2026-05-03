@@ -3,7 +3,7 @@ import { z } from 'zod';
 import crypto from 'crypto';
 import { getSupabase } from '../supabase';
 import { addClient, broadcast } from '../sse';
-import { persistTriple } from '../services/graph';
+import { persistTriple, loadRunGraph, LoadedRunGraph, GraphNode } from '../services/graph';
 import { chunkText, normalizeExtractedTriples } from '../services/ingestion';
 import { setRunRootContext } from '../services/ai';
 
@@ -116,6 +116,42 @@ router.post('/', async (req: Request, res: Response) => {
     }
     console.error('Error creating run:', err);
     return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Snapshot endpoint — lets the frontend rehydrate a run on reload without
+// replaying every SSE event. Returns nodes, edges, and sources as a
+// self-contained graph. Returns 503 when Supabase isn't configured (local dev
+// without a DB has no snapshot to serve), and 404 when the runId isn't found.
+router.get('/:runId/graph', async (req: Request, res: Response) => {
+  try {
+    const runId = String(req.params.runId);
+    const snapshot = await loadRunGraph(runId);
+    if (snapshot === null && !getSupabase()) {
+      return res.status(503).json({ error: 'Supabase not configured; graph snapshot unavailable in local-only mode' });
+    }
+    if (!snapshot) return res.status(404).json({ error: `Run ${runId} not found` });
+    return res.json(snapshot);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown error loading run graph';
+    console.error('Error loading run graph:', message);
+    return res.status(500).json({ error: message });
+  }
+});
+
+router.get('/:runId/presentation-graph', async (req: Request, res: Response) => {
+  try {
+    const runId = String(req.params.runId);
+    const snapshot = await loadRunGraph(runId);
+    if (snapshot === null && !getSupabase()) {
+      return res.status(503).json({ error: 'Supabase not configured; presentation graph unavailable in local-only mode' });
+    }
+    if (!snapshot) return res.status(404).json({ error: `Run ${runId} not found` });
+    return res.json(buildPresentationGraph(snapshot));
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown error loading presentation graph';
+    console.error('Error loading presentation graph:', message);
+    return res.status(500).json({ error: message });
   }
 });
 
@@ -289,5 +325,84 @@ router.post('/:runId/uploads/text', (req: Request, res: Response) => {
     return res.status(500).json({ error: message });
   }
 });
+
+function buildPresentationGraph(snapshot: LoadedRunGraph) {
+  const nodeById = new Map(snapshot.nodes.map(node => [node.id, node]));
+  const centerNode = choosePresentationCenter(snapshot);
+  const categories = snapshot.nodes
+    .filter(node => node.type === 'Category' || node.properties.presentationRole === 'business_area')
+    .map(node => ({
+      ...node,
+      documents: snapshot.edges
+        .filter(edge => edge.source === node.id && edge.predicate === 'contains_document')
+        .map(edge => nodeById.get(edge.target))
+        .filter((related): related is GraphNode => related !== undefined && related.type === 'Document'),
+    }));
+  const documents = snapshot.nodes
+    .filter(node => node.type === 'Document' || node.properties.presentationRole === 'document')
+    .map(node => ({
+      ...node,
+      mentions: snapshot.edges
+        .filter(edge => edge.source === node.id && edge.predicate === 'mentions')
+        .map(edge => nodeById.get(edge.target))
+        .filter((related): related is GraphNode => related !== undefined),
+    }));
+  const topFacts = snapshot.edges
+    .filter(edge => !['has_business_area', 'contains_document', 'mentions'].includes(edge.predicate))
+    .sort((a, b) => importanceOf(b.properties) - importanceOf(a.properties) || (b.confidence ?? 0) - (a.confidence ?? 0))
+    .slice(0, 40)
+    .map(edge => ({
+      edge,
+      subject: nodeById.get(edge.source) ?? null,
+      object: nodeById.get(edge.target) ?? null,
+      sources: edge.sources ?? [],
+    }));
+  const crossLinks = snapshot.edges
+    .filter(edge => {
+      const source = nodeById.get(edge.source);
+      const target = nodeById.get(edge.target);
+      if (!source || !target) return false;
+      if (source.type === 'Category' || target.type === 'Category') return false;
+      if (source.type === 'Document' || target.type === 'Document') return false;
+      return edge.predicate !== 'mentions';
+    })
+    .slice(0, 60);
+
+  return {
+    runId: snapshot.runId,
+    prompt: snapshot.prompt,
+    centerNode,
+    categories,
+    documents,
+    topFacts,
+    crossLinks,
+  };
+}
+
+function choosePresentationCenter(snapshot: LoadedRunGraph): GraphNode | null {
+  const explicit = snapshot.nodes.find(node => node.properties.presentationRole === 'main_entity');
+  if (explicit) return explicit;
+
+  const structural = new Set(
+    snapshot.nodes
+      .filter(node => node.type === 'Category' || node.type === 'Document')
+      .map(node => node.id),
+  );
+  const degree = new Map<string, number>();
+  for (const edge of snapshot.edges) {
+    degree.set(edge.source, (degree.get(edge.source) ?? 0) + 1);
+    degree.set(edge.target, (degree.get(edge.target) ?? 0) + 1);
+  }
+
+  return snapshot.nodes
+    .filter(node => !structural.has(node.id))
+    .sort((a, b) => (degree.get(b.id) ?? 0) - (degree.get(a.id) ?? 0))[0]
+    ?? snapshot.nodes[0]
+    ?? null;
+}
+
+function importanceOf(properties: Record<string, unknown>): number {
+  return typeof properties.importance === 'number' ? properties.importance : 0;
+}
 
 export default router;

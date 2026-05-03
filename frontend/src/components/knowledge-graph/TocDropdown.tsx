@@ -1,11 +1,10 @@
 import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import type { Node, Edge } from '@xyflow/react';
-import type { GraphNodeData } from './GraphNode';
+import type { GraphEdge, GraphNode, GraphNodeData } from './graphTypes';
 
 interface TocDropdownProps {
-  nodes: Node[];
-  edges: Edge[];
+  nodes: GraphNode[];
+  edges: GraphEdge[];
   onNodeFocus: (nodeId: string) => void;
 }
 
@@ -41,13 +40,13 @@ export function TocDropdown({ nodes, edges, onNodeFocus }: TocDropdownProps) {
     label: (root.data as GraphNodeData).label,
     topics: (childrenMap.get(root.id) || [])
       .map(id => nodeMap.get(id))
-      .filter((n): n is Node => !!n && (n.data as GraphNodeData).nodeType === 'topic')
+      .filter((n): n is GraphNode => !!n && (n.data as GraphNodeData).nodeType === 'topic')
       .map(topic => ({
         id: topic.id,
         label: (topic.data as GraphNodeData).label,
         subs: (childrenMap.get(topic.id) || [])
           .map(id => nodeMap.get(id))
-          .filter((n): n is Node => !!n && (n.data as GraphNodeData).nodeType === 'subtopic')
+          .filter((n): n is GraphNode => !!n && (n.data as GraphNodeData).nodeType === 'subtopic')
           .map(sub => ({ id: sub.id, label: (sub.data as GraphNodeData).label })),
       })),
   }));

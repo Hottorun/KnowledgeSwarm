@@ -11,7 +11,7 @@ const client = new Anthropic({ apiKey: config.anthropicApiKey });
 const SYSTEM_PROMPT = `You are a knowledge extraction worker. Extract Subject-Predicate-Object triples from a document chunk.
 
 Output ONLY valid JSON — no markdown, no explanation:
-{"triples":[{"subject":{"id":"type:slug","label":"Label","type":"EntityType","properties":{}},"predicate":"verb_phrase","object":{"id":"type:slug","label":"Label","type":"EntityType","properties":{}},"confidence":0.0,"sources":[{"url":"document","title":"Document","snippet":"exact quote"}],"properties":{}}]}
+{"triples":[{"subject":{"id":"type:slug","label":"Label","type":"EntityType","properties":{}},"predicate":"verb_phrase","object":{"id":"type:slug","label":"Label","type":"EntityType","properties":{}},"confidence":0.0,"sources":[{"url":"document","title":"Document","snippet":"exact quote"}],"properties":{"category":"finance|hr-people|legal|operations|strategy-market|technology|risk|other","importance":0.0}}]}
 
 Rules:
 - Node ID format: type:slug (e.g. company:acme-corp, person:jane-doe, obligation:monthly-payment)
@@ -20,7 +20,9 @@ Rules:
 - Extract at most 10 triples per chunk
 - Prefer triples that connect entities back to the central company, organization, product, document, or topic in the chunk
 - Confidence: 0.9+ explicit | 0.7–0.9 strong implication | 0.5–0.7 inference — discard below 0.5
-- Use the exact quoted text as the source snippet
+- sources[0].snippet is REQUIRED — copy a verbatim quote (max ~280 chars) from the chunk that supports the triple. Empty/missing snippets cause the triple to be filtered out downstream.
+- properties.category MUST be one of the listed keys (use "other" only when none fit)
+- properties.importance is the triple's standalone importance to the overall graph (0.0–1.0): 0.85+ for headline facts (revenues, leadership, contracts, risks), 0.6–0.85 for solid context, below 0.6 for trivia. Be honest — over-rating dilutes the signal.
 - Keep JSON compact`;
 
 export async function runWorker(
@@ -41,6 +43,7 @@ Preferred predicates: ${specialist.preferredPredicates.join(', ')}
 Focus entity types: ${[...new Set([...focusNodeTypes, ...specialist.nodeTypes])].join(', ')}
 Branch: ${branch.label} - ${branch.focus}
 Source document: ${documentName}
+Default category for this branch: ${specialistKindToCategoryKey(specialist.kind)} — use this when no other category clearly fits the triple.
 
 Document chunk ${chunk.index}:
 
@@ -99,6 +102,16 @@ function normalizeWorkerTriples(triples: Triple[]): Triple[] {
 
 function makeId(type: string, label: string): string {
   return `${type.toLowerCase()}:${label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}`;
+}
+
+function specialistKindToCategoryKey(kind: SpecialistProfile['kind']): string {
+  switch (kind) {
+    case 'people': return 'hr-people';
+    case 'market': return 'strategy-market';
+    case 'technical': return 'technology';
+    case 'general': return 'other';
+    default: return kind;
+  }
 }
 
 function withProvenance(

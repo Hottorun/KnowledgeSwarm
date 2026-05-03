@@ -32,8 +32,14 @@ Rules:
 - Use ONLY existing node IDs from the component summaries.
 - Do not invent nodes.
 - Add at most one bridge from the main component to each disconnected component.
-- Prefer concrete predicates like employs, owns, supplies, governed_by, contracts_with, reports_to, uses, sells, operates_in, exposed_to.
-- Use "related_to" only when no more specific predicate is defensible.
+- Predicate preference order (use the FIRST that fits the evidence):
+  1. document → mentions → entity         — when the orphan was extracted from a document scaffold node visible in the components
+  2. category → contains_document → document  — for orphan documents that match a category scaffold
+  3. main_entity → has_business_area → category  — for orphan categories
+  4. entity → belongs_to → category         — for orphan facts that clearly fit a category but no document
+  5. concrete domain predicates: employs, owns, supplies, governed_by, contracts_with, reports_to, uses, sells, operates_in, exposed_to
+  6. "related_to" only when nothing else is defensible
+- Bridges that route through scaffold nodes (document/category/main_entity) are STRONGLY PREFERRED — they make the orphan reachable AND properly categorised.
 - Confidence must be 0.50 to 0.75 because these are inferred repair links.
 - Keep JSON compact.`;
 
@@ -192,7 +198,15 @@ function deterministicBridgeTriples(
   const mainNode = selectHubNode(main, nodeById);
   if (!mainNode) return [];
 
+  // Scaffold lookup: presentation pass already emits document/category/main_entity
+  // nodes — prefer routing orphans through them so the bridge edge carries
+  // semantic meaning instead of a generic "co_mentioned_with".
+  const scaffold = collectScaffoldNodes(triples);
+
   return components.slice(1).flatMap(component => {
+    const bridge = scaffoldBridgeForComponent(component, mainNode, scaffold, nodeById, documentName, reason);
+    if (bridge) return [bridge];
+
     const targetNode = selectHubNode(component, nodeById);
     if (!targetNode) return [];
 
@@ -215,6 +229,145 @@ function deterministicBridgeTriples(
       },
     }];
   });
+}
+
+interface ScaffoldIndex {
+  // category-key → category scaffold node
+  byCategory: Map<string, GraphNode>;
+  // documentName → document scaffold node
+  byDocument: Map<string, GraphNode>;
+  // the main_entity node, if tagged
+  mainEntity: GraphNode | null;
+}
+
+function collectScaffoldNodes(triples: Triple[]): ScaffoldIndex {
+  const byCategory = new Map<string, GraphNode>();
+  const byDocument = new Map<string, GraphNode>();
+  let mainEntity: GraphNode | null = null;
+
+  const visit = (node: GraphNode) => {
+    const role = node.properties?.presentationRole;
+    if (role === 'main_entity' && !mainEntity) mainEntity = node;
+    if (role === 'business_area') {
+      const category = typeof node.properties?.category === 'string' ? node.properties.category : null;
+      if (category && !byCategory.has(category)) byCategory.set(category, node);
+    }
+    if (role === 'document') {
+      const documentName = typeof node.properties?.documentName === 'string' ? node.properties.documentName : null;
+      if (documentName && !byDocument.has(documentName)) byDocument.set(documentName, node);
+    }
+  };
+
+  for (const triple of triples) {
+    visit(triple.subject);
+    visit(triple.object);
+  }
+
+  return { byCategory, byDocument, mainEntity };
+}
+
+function scaffoldBridgeForComponent(
+  component: ConnectedComponent,
+  mainNode: GraphNode,
+  scaffold: ScaffoldIndex,
+  nodeById: Map<string, GraphNode>,
+  fallbackDocumentName: string,
+  reason: string,
+): Triple | null {
+  const hub = selectHubNode(component, nodeById);
+  if (!hub) return null;
+  if (component.nodeIds.includes(mainNode.id)) return null;
+
+  const componentDocumentNames = collectComponentValues(component, nodeById, 'documentName');
+  const componentCategories = collectComponentValues(component, nodeById, 'category');
+
+  // 1. Document → mentions → orphan hub
+  for (const docName of componentDocumentNames) {
+    const docNode = scaffold.byDocument.get(docName);
+    if (docNode && !component.nodeIds.includes(docNode.id)) {
+      return makeBridgeTriple(docNode, 'mentions', hub, 0.62, fallbackDocumentName, reason, {
+        scaffoldRoute: 'document',
+        documentName: docName,
+      });
+    }
+  }
+
+  // 2. Category → contains_document → orphan document
+  if (hub.properties?.presentationRole === 'document') {
+    for (const category of componentCategories) {
+      const categoryNode = scaffold.byCategory.get(category);
+      if (categoryNode && !component.nodeIds.includes(categoryNode.id)) {
+        return makeBridgeTriple(categoryNode, 'contains_document', hub, 0.6, fallbackDocumentName, reason, {
+          scaffoldRoute: 'category-document',
+          category,
+        });
+      }
+    }
+  }
+
+  // 3. Category → has_member → orphan entity
+  for (const category of componentCategories) {
+    const categoryNode = scaffold.byCategory.get(category);
+    if (categoryNode && !component.nodeIds.includes(categoryNode.id)) {
+      return makeBridgeTriple(categoryNode, 'has_member', hub, 0.55, fallbackDocumentName, reason, {
+        scaffoldRoute: 'category',
+        category,
+      });
+    }
+  }
+
+  // 4. Main entity → related_to → orphan hub (semantic fallback before co_mentioned_with)
+  if (scaffold.mainEntity && !component.nodeIds.includes(scaffold.mainEntity.id)) {
+    return makeBridgeTriple(scaffold.mainEntity, 'related_to', hub, 0.5, fallbackDocumentName, reason, {
+      scaffoldRoute: 'main-entity',
+    });
+  }
+
+  return null;
+}
+
+function collectComponentValues(
+  component: ConnectedComponent,
+  nodeById: Map<string, GraphNode>,
+  key: 'documentName' | 'category',
+): string[] {
+  const values = new Set<string>();
+  for (const id of component.nodeIds) {
+    const node = nodeById.get(id);
+    const value = node?.properties?.[key];
+    if (typeof value === 'string' && value) values.add(value);
+  }
+  return [...values];
+}
+
+function makeBridgeTriple(
+  subject: GraphNode,
+  predicate: string,
+  object: GraphNode,
+  confidence: number,
+  documentName: string,
+  reason: string,
+  extraProps: Record<string, unknown>,
+): Triple {
+  return {
+    subject,
+    predicate,
+    object,
+    confidence,
+    sources: [{
+      url: `local://${encodeURIComponent(documentName)}`,
+      title: documentName,
+      snippet: `Connectivity repair routed the orphan component through a scaffold node (${extraProps.scaffoldRoute}).`,
+    }],
+    properties: {
+      inferred: true,
+      repairAgent: 'ConnectivityAgent',
+      deterministic: true,
+      reason,
+      documentName,
+      ...extraProps,
+    },
+  };
 }
 
 function selectHubNode(component: ConnectedComponent, nodeById: Map<string, GraphNode>): GraphNode | null {

@@ -181,6 +181,7 @@ router.post('/read-all', async (req: Request, res: Response) => {
     console.log(`[mcp] Successfully read ${allFiles.length} files`);
     return res.json({
       content: allFiles.map(f => ({ type: 'text', text: `--- ${f.name} ---\n${f.text}` })),
+      files: allFiles,
       filesCount: allFiles.length,
     });
   } catch (err) {

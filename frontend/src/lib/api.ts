@@ -185,9 +185,15 @@ export const MCP_CONNECTOR_URL = `${API_BASE}/downloads/knowledge-swarm-connecto
 
 interface McpReadAllResponse {
   content?: Array<{ text: string }>;
+  files?: Array<{ name: string; text: string }>;
 }
 
 export async function mcpReadAll(mcpServerUrl?: string): Promise<string> {
+  const files = await mcpReadAllFiles(mcpServerUrl);
+  return files.map(file => `--- ${file.name} ---\n${file.text}`).join('\n\n');
+}
+
+export async function mcpReadAllFiles(mcpServerUrl?: string): Promise<Array<{ name: string; text: string }>> {
   const res = await fetch(`${API_BASE}/mcp/read-all`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -198,7 +204,19 @@ export async function mcpReadAll(mcpServerUrl?: string): Promise<string> {
     throw new Error(errorData.error ?? 'Failed to read files from MCP server');
   }
   const data = await res.json() as McpReadAllResponse;
-  return data.content?.map(c => c.text).join('\n\n') ?? '';
+  if (Array.isArray(data.files) && data.files.length > 0) {
+    return data.files.filter(file => file.name && file.text);
+  }
+
+  return (data.content ?? [])
+    .map((entry, index) => {
+      const match = entry.text.match(/^---\s+(.+?)\s+---\n?([\s\S]*)$/);
+      return {
+        name: match?.[1]?.trim() || `mcp-file-${index + 1}.txt`,
+        text: match?.[2] ?? entry.text,
+      };
+    })
+    .filter(file => file.text.trim());
 }
 
 export interface SubtreeNode {

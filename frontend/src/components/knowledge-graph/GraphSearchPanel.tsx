@@ -1,7 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import type { Node } from '@xyflow/react';
-import type { GraphNodeData } from './GraphNode';
+import type { GraphNode, GraphNodeData } from './graphTypes';
 
 interface SearchResult {
   nodeId: string;
@@ -10,7 +9,7 @@ interface SearchResult {
   score: number;
 }
 
-function searchNodes(query: string, nodes: Node[]): SearchResult[] {
+function searchNodes(query: string, nodes: GraphNode[]): SearchResult[] {
   const q = query.toLowerCase().trim();
   if (!q) return [];
 
@@ -40,7 +39,7 @@ function searchNodes(query: string, nodes: Node[]): SearchResult[] {
 }
 
 interface GraphSearchPanelProps {
-  nodes: Node[];
+  nodes: GraphNode[];
   isOpen: boolean;
   onClose: () => void;
   onFocusNode: (nodeId: string) => void;

@@ -9,7 +9,7 @@ interface WorkerEdge {
   target: string;
 }
 
-// Inlined from GraphNode.tsx so the worker has no React/DOM deps
+// Inlined from graphTypes.ts so the worker has no React/DOM deps
 const nodeDims: Record<string, { w: number; h: number }> = {
   root:     { w: 210, h: 76 },
   topic:    { w: 175, h: 62 },

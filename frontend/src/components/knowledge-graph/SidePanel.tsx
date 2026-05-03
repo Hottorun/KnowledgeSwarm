@@ -1,8 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import type { AIReasoningStep } from './types';
-import type { Node, Edge } from '@xyflow/react';
-import type { GraphNodeData } from './GraphNode';
+import type { GraphEdge, GraphNode, GraphNodeData } from './graphTypes';
 import type { NodeCategory } from '@/lib/api';
 
 function CategoryList({
@@ -12,7 +11,7 @@ function CategoryList({
   onNodeFocus,
 }: {
   categories: NodeCategory[];
-  nodes: Node[];
+  nodes: GraphNode[];
   onFocusMultiple?: (nodeIds: string[]) => void;
   onNodeFocus?: (nodeId: string) => void;
 }) {
@@ -213,8 +212,8 @@ interface SidePanelProps {
   side: 'left' | 'right';
   isOpen: boolean;
   onClose: () => void;
-  nodes?: Node[];
-  edges?: Edge[];
+  nodes?: GraphNode[];
+  edges?: GraphEdge[];
   onNodeFocus?: (nodeId: string) => void;
   onFocusMultiple?: (nodeIds: string[]) => void;
   categories?: NodeCategory[];

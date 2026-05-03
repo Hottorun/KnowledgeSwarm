@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-KnowledgeSwarm is a live knowledge graph builder. Users connect local data (files or MCP folder) and the system extracts entities/relationships into a React Flow graph in real time using a specialist AI swarm. Web search is a secondary, node-level-only expansion — never the primary data path.
+KnowledgeSwarm is a live knowledge graph builder. Users connect local data (files or MCP folder) and the system extracts entities/relationships into a Sigma.js/Graphology graph in real time using a specialist AI swarm. Web search is a secondary, node-level-only expansion — never the primary data path.
 
 ---
 
@@ -14,7 +14,7 @@ KnowledgeSwarm/
 │   ├── api/                  # Express backend (port 8787)
 │   ├── orchestrator/         # Claude specialist swarm
 │   └── mcp-bridge/           # HTTP bridge for MCP filesystem server (port 8790)
-├── insight-bloom-651-main/   # React frontend (Bun + Vite + TanStack Start)
+├── frontend/   # React frontend (Bun + Vite + TanStack Start)
 ├── supabase/
 │   └── migrations/0001_initial_schema.sql
 ├── docs/                     # API contract, runbooks, integration guides
@@ -32,7 +32,7 @@ KnowledgeSwarm/
 |-------|-------|
 | Backend | TypeScript, Express 4, Zod, SSE, Supabase |
 | Orchestrator | TypeScript, Claude API (`@anthropic-ai/sdk`), prompt caching |
-| Frontend | React 19, Vite 7, TanStack Start, `@xyflow/react` v12, Tailwind CSS v4, Framer Motion, Radix UI / shadcn |
+| Frontend | React 19, Vite 7, TanStack Start, Sigma.js, Graphology, Tailwind CSS v4, Framer Motion, Radix UI / shadcn |
 | MCP Bridge | TypeScript, Express, `@modelcontextprotocol/sdk` |
 | Database | Supabase (Postgres + Realtime) |
 
@@ -46,7 +46,7 @@ KnowledgeSwarm/
 4. Backend chunks uploaded text via `POST /runs/:runId/uploads/text` → returns chunks.
 5. Orchestrator (specialist swarm) reads chunks → extracts SPO triples → calls `POST /runs/:runId/raw-triples`.
 6. Backend normalizes triples → persists to Supabase → streams `node.created`, `edge.created`, `source.created` events over SSE.
-7. Frontend upserts React Flow nodes/edges as events arrive, runs force-directed auto-layout.
+7. Frontend upserts graph nodes/edges as events arrive and renders the whole graph through Sigma.js.
 8. User clicks a node → side panel opens with details and a question box.
 9. Node Q&A: orchestrator expander answers from graph/files first. Web search (`POST /search`) only if local data insufficient.
 
@@ -160,7 +160,7 @@ POST /runs/:runId/raw-triples → SSE → frontend
 
 ## Frontend
 
-**Location:** `insight-bloom-651-main/`
+**Location:** `frontend/`
 **Package manager:** Bun
 **Dev command:** `bun run dev`
 
@@ -170,25 +170,25 @@ POST /runs/:runId/raw-triples → SSE → frontend
 |------|---------|
 | `src/routes/index.tsx` | Single-page knowledge graph interface |
 | `src/components/knowledge-graph/KnowledgeGraphCanvas.tsx` | Main orchestrator (state, SSE, layout, events) |
-| `src/components/knowledge-graph/GraphNode.tsx` | Node renderer |
+| `src/components/knowledge-graph/SigmaGraphView.tsx` | Sigma/Graphology whole-graph renderer |
+| `src/components/knowledge-graph/graphTypes.ts` | Shared graph node/edge types and sizing helpers |
 | `src/components/knowledge-graph/SidePanel.tsx` | Left (TOC) & Right (Reasoning) drawers |
 | `src/components/knowledge-graph/NodeInputBox.tsx` | Node action popup |
-| `src/components/knowledge-graph/FloatingEdge.tsx` | Custom edge renderer |
 | `src/components/knowledge-graph/TopNav.tsx` | Header |
 | `src/components/knowledge-graph/AnimatedBlob.tsx` | Landing/loading blob |
 
 ### Layout Engine
 
-Force-directed layout: Coulomb repulsion + Hooke springs + AABB collision resolution. Auto `fitView` after each layout pass.
+Sigma uses a branch-preserving layout: main entity → categories/buckets → documents/entities/facts. Dense center fanout is capped and overflow is grouped into semantic bucket nodes.
 
-### React Flow Mapping
+### Frontend Graph Mapping
 
 ```ts
-// Backend node → React Flow node
+// Backend node → frontend graph node
 { id: node.id, type: 'default', position: { x: 0, y: 0 },
   data: { label: node.label, entityType: node.type, properties: node.properties } }
 
-// Backend edge → React Flow edge
+// Backend edge → frontend graph edge
 { id: `${edge.source}:${edge.predicate}:${edge.target}`,
   source: edge.source, target: edge.target,
   label: edge.predicate, data: { confidence: edge.confidence } }
@@ -333,7 +333,7 @@ Node click → side panel with: label, entity type, properties, source snippets,
 |-----|------|
 | Dev 1 | Backend API (`apps/api`), Supabase infra, MCP bridge, SSE, search integration |
 | Dev 2 | Orchestrator (`apps/orchestrator`): chunking, LLM extraction → raw triples, node Q&A (graph-first then search) |
-| Dev 3 | Frontend (`insight-bloom-651-main`): MCP instructions panel, drag/drop upload, SSE → React Flow, node detail panel |
+| Dev 3 | Frontend (`frontend`): MCP instructions panel, drag/drop upload, SSE → Sigma graph, node detail panel |
 
 ---
 
@@ -345,7 +345,7 @@ Node click → side panel with: label, entity type, properties, source snippets,
 - Specialist swarm orchestrator (Claude API with agents, prompt caching)
 - Text chunking and triple normalization
 - MCP HTTP bridge wrapper
-- Frontend React Flow visualization (force-directed layout)
+- Frontend Sigma.js whole-graph visualization
 - Graph search panel, undo/redo, node deletion
 - Node expansion with AI (expander agent)
 - Drag/drop file upload path

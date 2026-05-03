@@ -1,13 +1,17 @@
 import { motion, AnimatePresence } from 'framer-motion';
 import { useState, useCallback, useRef } from 'react';
 import type { AIReasoningStep } from './types';
-import { checkMcpHealth, mcpReadAll, MCP_CONNECTOR_URL } from '@/lib/api';
+import { checkMcpHealth, mcpReadAllFiles, MCP_CONNECTOR_URL } from '@/lib/api';
 import { extractFileText } from '@/lib/pdf';
 
 const READABLE_EXTENSIONS = /\.(txt|md|csv|json|pdf)$/i;
 
 interface AnimatedBlobProps {
-  onDataSubmit: (text: string, documentName?: string) => void | Promise<void>;
+  onDataSubmit: (
+    text: string,
+    documentName?: string,
+    additionalFiles?: Array<{ name: string; text: string }>,
+  ) => void | Promise<void>;
   isDissolving: boolean;
 }
 
@@ -56,10 +60,13 @@ export function AnimatedBlob({ onDataSubmit, isDissolving }: AnimatedBlobProps) 
         name: file.name,
         text: await extractFileText(file),
       })));
-      await onDataSubmit(
-        contents.map(file => `--- ${file.name} ---\n${file.text}`).join('\n\n'),
-        contents.map(file => file.name).join(', '),
-      );
+      // Each uploaded file should produce its own Document node — never a single
+      // node whose label is a comma-separated list of file names. Hand the first
+      // file's text to onDataSubmit (it creates the run) and pass the rest as
+      // additionalFiles so the parent can extract them sequentially against the
+      // same run.
+      const [first, ...rest] = contents;
+      await onDataSubmit(first.text, first.name, rest);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to read file';
       setFileError(msg);
@@ -97,15 +104,16 @@ export function AnimatedBlob({ onDataSubmit, isDissolving }: AnimatedBlobProps) 
 
       setMcpStatus('reading');
 
-      const text = await mcpReadAll(serverUrl);
+      const files = await mcpReadAllFiles(serverUrl);
 
-      if (!text.trim()) {
+      if (files.length === 0) {
         setMcpStatus('error');
         setMcpError('No readable files found (.txt, .md, .csv, .json).');
         return;
       }
 
-      await onDataSubmit(text, 'MCP files');
+      const [first, ...rest] = files;
+      await onDataSubmit(first.text, first.name, rest);
     } catch (err) {
       setMcpStatus('error');
       const errorMsg = err instanceof Error ? err.message : 'Connection failed.';

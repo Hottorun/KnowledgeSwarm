@@ -1,11 +1,19 @@
 import { config } from './config';
 import { decomposeDocument } from './agents/meta';
 import { runSupervisor } from './agents/supervisor';
-import { specialistForBranch } from './agents/specialists';
+import { decideSpecialistRouting, specialistForBranch } from './agents/specialists';
 import { repairDisconnectedGraph } from './agents/graphRepair';
+import { detectMainEntity, fallbackMainEntityFromDocument, type MainEntityDetection } from './agents/mainEntity';
+import { classifyDocument } from './agents/classifier';
 import { emitAgentEvent, emitTriples, setEmitCallbacks, EmitCallbacks } from './tools/emit';
-import { analyzeConnectedComponents, normalizeTriples } from './ingest/normalizer';
+import { analyzeConnectedComponents, normalizeAndDeduplicate, normalizeTriples } from './ingest/normalizer';
 import { chunkText, buildDocumentSummary } from './ingest/chunker';
+import {
+  annotateTriplesForPresentation,
+  buildPresentationTriples,
+  summarizeDocumentText,
+  type DocumentCategoryAssignment,
+} from './ingest/presentation';
 export { expandNode } from './agents/expander';
 
 export interface OrchestratorCallbacks extends EmitCallbacks {
@@ -44,40 +52,100 @@ export async function orchestrate(
   console.log(`[ingest] ${chunks.length} chunk(s)`);
 
   const summary = buildDocumentSummary(effectiveDocumentText, config.metaSummaryChars);
+  const documentSummaries = new Map<string, string>([
+    [documentName, summarizeDocumentText(effectiveDocumentText)],
+  ]);
 
-  await emitAgentEvent(runId, 'MetaAgent', 'decomposing', 'Analyzing document structure');
-  const { documentType, branches } = await decomposeDocument(summary);
+  // Classify the document up front so the presentation scaffold uses the
+  // model's primary category instead of the keyword-based dominantCategory
+  // fallback. Runs in parallel with decomposition since both consume the
+  // document summary and have no ordering dependency.
+  const [{ documentType, branches }, classification] = await Promise.all([
+    (async () => {
+      await emitAgentEvent(runId, 'MetaAgent', 'decomposing', 'Analyzing document structure');
+      return decomposeDocument(summary);
+    })(),
+    classifyDocument(runId, documentName, summary),
+  ]);
+
+  const documentClassifications = new Map<string, DocumentCategoryAssignment>([
+    [documentName, {
+      primaryCategory: classification.primaryCategory,
+      secondaryCategories: classification.secondaryCategories,
+      source: classification.source,
+    }],
+  ]);
 
   console.log(`[meta] documentType=${documentType}, ${branches.length} branch(es):`);
   branches.forEach(b => console.log(`  - ${b.id}: ${b.label}`));
-  const specialists = branches.map(specialistForBranch);
-  specialists.forEach((specialist, i) =>
+  const allSpecialists = branches.map(specialistForBranch);
+  allSpecialists.forEach((specialist, i) =>
     console.log(`  -> ${branches[i].id}: ${specialist.agentName} (${specialist.kind})`)
   );
 
+  // Specialist routing by document classification: if the classifier is
+  // confident about the document's category, drop specialists whose kind
+  // doesn't fit that category. Conservative — when confidence is low or the
+  // category is "other", we keep every specialist running so we never silently
+  // lose facts. See `decideSpecialistRouting` in ./agents/specialists.ts.
+  const routing = decideSpecialistRouting({
+    available: allSpecialists.map(specialist => specialist.kind),
+    primaryCategory: classification.primaryCategory,
+    secondaryCategories: classification.secondaryCategories,
+    confidence: classification.confidence,
+  });
+
+  const keptIndices = allSpecialists
+    .map((specialist, i) => routing.keptKinds.includes(specialist.kind) ? i : -1)
+    .filter(i => i >= 0);
+  const branchesToRun = keptIndices.map(i => branches[i]);
+  const specialists = keptIndices.map(i => allSpecialists[i]);
+  const droppedSpecialists = allSpecialists.filter((_, i) => !keptIndices.includes(i));
+
+  if (droppedSpecialists.length > 0) {
+    console.log(`[routing] skipping ${droppedSpecialists.length} specialist(s) based on document category "${classification.primaryCategory}" (confidence=${classification.confidence.toFixed(2)})`);
+    droppedSpecialists.forEach(specialist =>
+      console.log(`  -> skip ${specialist.agentName} (${specialist.kind})`)
+    );
+  }
+  await emitAgentEvent(runId, 'MetaAgent', 'routing', `Specialist routing: ${specialists.length} kept, ${droppedSpecialists.length} skipped`, {
+    primaryCategory: classification.primaryCategory,
+    secondaryCategories: classification.secondaryCategories,
+    confidence: classification.confidence,
+    routingSource: routing.source,
+    kept: specialists.map(s => ({ kind: s.kind, agentName: s.agentName })),
+    skipped: droppedSpecialists.map(s => ({ kind: s.kind, agentName: s.agentName })),
+  });
+
   // Every branch processes every chunk — each specialist extracts what's relevant
   // to their focus from the full document, deduplication handles the overlap.
-  const branchChunks = branches.map(() => chunks);
+  const branchChunks = branchesToRun.map(() => chunks);
 
-  await emitAgentEvent(runId, 'MetaAgent', 'dispatching', `${branches.length} specialists in parallel`, {
+  await emitAgentEvent(runId, 'MetaAgent', 'dispatching', `${branchesToRun.length} specialists in parallel`, {
     documentType,
     specialists: specialists.map((specialist, i) => ({
-      branchId: branches[i].id,
-      branchLabel: branches[i].label,
+      branchId: branchesToRun[i].id,
+      branchLabel: branchesToRun[i].label,
       agentName: specialist.agentName,
       kind: specialist.kind,
     })),
   });
 
   const allExtractedTriples: Awaited<ReturnType<typeof runSupervisor>> = [];
+  const emittedTripleKeys = new Set<string>();
+  // Main entity is detected once after the first batch of triples comes in,
+  // then reused for the rest of the run so the graph's center stays stable
+  // even as more chunks land. Without this, every incremental rebuild could
+  // reshuffle who the central node is, which makes the canvas feel jumpy.
+  let mainEntityDetection: MainEntityDetection | null = null;
 
   // Process branches as they complete (not all at once)
   type BranchResult =
-    | { status: 'fulfilled'; value: Awaited<ReturnType<typeof runSupervisor>>; branch: typeof branches[number]; i: number }
-    | { status: 'rejected'; reason: unknown; branch: typeof branches[number]; i: number };
+    | { status: 'fulfilled'; value: Awaited<ReturnType<typeof runSupervisor>>; branch: typeof branchesToRun[number]; i: number }
+    | { status: 'rejected'; reason: unknown; branch: typeof branchesToRun[number]; i: number };
   type BranchTask = Promise<{ result: BranchResult; task: BranchTask }>;
 
-  const branchPromises: BranchTask[] = branches.map((branch, i) => {
+  const branchPromises: BranchTask[] = branchesToRun.map((branch, i) => {
     const work: Promise<BranchResult> = runSupervisor(runId, branch, branchChunks[i], specialists[i], documentName)
       .then(triples => ({ status: 'fulfilled' as const, value: triples, branch, i }))
       .catch(error => ({ status: 'rejected' as const, reason: error, branch, i }));
@@ -97,13 +165,64 @@ export async function orchestrate(
       const { value: triples, branch } = result;
       console.log(`[orchestrator] branch "${branch.id}" completed with ${triples.length} triples`);
       allExtractedTriples.push(...triples);
+
+      const incrementalAnnotated = annotateTriplesForPresentation(allExtractedTriples, documentName, documentClassifications);
+      // First batch with extracted triples → run MainEntityAgent and lock in
+      // the choice. Subsequent batches reuse it.
+      if (!mainEntityDetection && incrementalAnnotated.length > 0) {
+        mainEntityDetection = await detectMainEntity(runId, incrementalAnnotated, documentName);
+      }
+      const incrementalPresentation = buildPresentationTriples(
+        incrementalAnnotated,
+        documentName,
+        documentSummaries,
+        mainEntityDetection?.entity,
+        documentClassifications,
+      );
+      const incrementalTriples = normalizeAndDeduplicate(
+        [...incrementalAnnotated, ...incrementalPresentation],
+        emittedTripleKeys,
+      );
+      if (incrementalTriples.length > 0) {
+        await emitAgentEvent(
+          runId,
+          'MetaAgent',
+          'presentation.streaming',
+          `Streaming ${incrementalTriples.length} new graph triple(s) from ${branch.label}`
+        );
+        await emitTriples(runId, 'MetaAgent', incrementalTriples);
+      }
     } else {
       console.error(`[orchestrator] branch "${result.branch.id}" failed:`, result.reason);
     }
   }
 
   await emitAgentEvent(runId, 'MetaAgent', 'normalizing', `Deduplicating ${allExtractedTriples.length} extracted triple(s)`);
-  const normalized = normalizeTriples(allExtractedTriples);
+  const annotatedTriples = annotateTriplesForPresentation(allExtractedTriples, documentName, documentClassifications);
+  // If extraction returned 0 triples we never ran MainEntityAgent during the
+  // streaming loop. Fall back to the document name so the graph still has a
+  // center node and `presentationRole: 'main_entity'` is set somewhere.
+  if (!mainEntityDetection) {
+    mainEntityDetection = annotatedTriples.length > 0
+      ? await detectMainEntity(runId, annotatedTriples, documentName)
+      : fallbackMainEntityFromDocument(documentName);
+  }
+  const presentationTriples = buildPresentationTriples(
+    annotatedTriples,
+    documentName,
+    documentSummaries,
+    mainEntityDetection.entity,
+    documentClassifications,
+  );
+  if (presentationTriples.length > 0) {
+    await emitAgentEvent(
+      runId,
+      'MetaAgent',
+      'presentation.scaffolded',
+      `Added ${presentationTriples.length} category/document scaffold triple(s)`
+    );
+  }
+  const normalized = normalizeTriples([...annotatedTriples, ...presentationTriples]);
   let finalTriples = normalized;
   let components = analyzeConnectedComponents(finalTriples);
 
@@ -143,7 +262,13 @@ export async function orchestrate(
     throw new Error('Swarm extracted 0 triples');
   }
 
-  await emitTriples(runId, 'MetaAgent', finalTriples);
+  const finalNewTriples = finalTriples.filter(triple => {
+    const key = `${triple.subject.id}|${triple.predicate}|${triple.object.id}`;
+    if (emittedTripleKeys.has(key)) return false;
+    emittedTripleKeys.add(key);
+    return true;
+  });
+  await emitTriples(runId, 'MetaAgent', finalNewTriples);
   await emitAgentEvent(runId, 'MetaAgent', 'completed', `Done. ${finalTriples.length} triples in graph (${components.length} component${components.length === 1 ? '' : 's'})`);
 }
 

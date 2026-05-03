@@ -105,6 +105,11 @@ router.post('/runs/:runId/extract', async (req: Request, res: Response) => {
       rawTriples = extractHeuristicTriples(text, documentName);
     }
 
+    // Heuristic fallback path: emit raw triples only. Presentation scaffold
+    // (main entity, category, document nodes) is the orchestrator's
+    // responsibility — see apps/orchestrator/src/ingest/presentation.ts.
+    // The frontend's presentationGraph.ts synthesises a hub view when no
+    // scaffold is present, so a thin raw graph still renders.
     const triples = normalizeExtractedTriples('ExtractionAgent', rawTriples);
 
     for (const triple of triples) {

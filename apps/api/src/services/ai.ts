@@ -249,6 +249,7 @@ interface ItemConnection {
   parentId: string;
   predicate: string;
   confidence: number;
+  additional?: Array<{ parentId: string; predicate: string; confidence: number }>;
 }
 
 export async function expandSubtree(input: ExpandSubtreeInput): Promise<ExpandSubtreeResult> {
@@ -379,7 +380,8 @@ STRICT RULES:
 - Labels must be specific and human-readable, max 60 characters, no snake_case
 - Omit vague or generic items ("some facts", "various companies")
 - Type must be one of: Company, Person, Product, Market, Technology, Location, Concept, Entity
-- Do NOT duplicate labels from the EXISTING list
+- Do NOT duplicate labels from the EXISTING list — if the research talks about an entity that already exists, reuse it; do NOT emit a new item with the same/similar label
+- Prefer items that PLAUSIBLY CONNECT to multiple existing labels (the routing pass will use those connections); items that only attach to ROOT are still allowed but lower priority
 - HARD LIMIT: return at most 8 items total. Rank by semantic relevance to the target and question; drop everything beyond position 8. Quality over quantity.
 
 SPO SCHEMA — NON-NEGOTIABLE:
@@ -465,11 +467,13 @@ ${allWebContext.slice(0, 24).join('\n\n')}`;
     ? `\nMANDATORY: A category node "${categoryTitle}" (ID: "${categoryId}") has been pre-created and linked to ROOT. You MUST set parentId to "${categoryId}" for every item — no exceptions. Do NOT route any item to ROOT directly.`
     : '';
 
-  const pass2System = `You are a graph routing agent. Your ONLY job: assign each new item to its correct parent node.
+  const pass2System = `You are a graph routing agent. Your job: assign each new item to ONE primary parent and OPTIONALLY identify cross-connections to other existing graph nodes when the research clearly supports them.
 
 STRICT RULES:
-- Every item must connect to EXACTLY ONE parent from AVAILABLE PARENTS — no other IDs allowed
-- Never connect an item to itself${categoryDirective}
+- Every item must have exactly ONE primary parent from AVAILABLE PARENTS — no other IDs allowed
+- Items MAY also have 0–2 additional connections, each pointing to a DIFFERENT existing parent from AVAILABLE PARENTS, but only when the research evidence explicitly links the item to that parent
+- Never connect an item to itself, never duplicate primary as additional
+- Do not invent additional connections — if the evidence is weak, leave additional empty${categoryDirective}
 
 PREDICATE — NON-NEGOTIABLE:
 The predicate is the SEMANTIC RELATIONSHIP label on the edge. It must name the attribute or relationship, never a generic connector.
@@ -482,7 +486,17 @@ For attribute values (numbers, dates, locations), the predicate MUST be the attr
   ✗ Company  --(relates_to)----> "391 billion USD"   ← meaningless
 For entity relationships use specific verbs: "founded_by", "acquired", "competes_with", "led_by", "includes", "located_in".
 
-Output JSON: { "connections": [{ "itemLabel": string, "parentId": string, "predicate": string, "confidence": number }] }`;
+Output JSON: {
+  "connections": [
+    {
+      "itemLabel": string,
+      "parentId": string,
+      "predicate": string,
+      "confidence": number,
+      "additional": [{ "parentId": string, "predicate": string, "confidence": number }]
+    }
+  ]
+}`;
 
   const pass2User = `ROOT: "${rootNode.label}" (ID: "${rootNode.id}")
 ${question ? `QUESTION: ${question}` : ''}
@@ -501,12 +515,31 @@ ${JSON.stringify(extractedItems.map(i => ({ id: i.id, label: i.label, type: i.ty
   const pass2Parsed = JSON.parse(pass2Raw) as { connections?: Array<Record<string, unknown>> };
   const connections: ItemConnection[] = (pass2Parsed.connections || [])
     .filter(c => c.itemLabel && c.parentId)
-    .map(c => ({
-      itemLabel: String(c.itemLabel),
-      parentId: String(c.parentId),
-      predicate: String(c.predicate || 'relates_to'),
-      confidence: typeof c.confidence === 'number' ? Math.max(0, Math.min(1, c.confidence)) : 0.7,
-    }));
+    .map(c => {
+      const primaryParentId = String(c.parentId);
+      const rawAdditional = Array.isArray(c.additional) ? c.additional : [];
+      const additional: NonNullable<ItemConnection['additional']> = [];
+      for (const extra of rawAdditional.slice(0, 2)) {
+        if (!extra || typeof extra !== 'object') continue;
+        const extraParentId = String((extra as Record<string, unknown>).parentId ?? '');
+        if (!extraParentId || extraParentId === primaryParentId) continue;
+        if (additional.some(a => a.parentId === extraParentId)) continue;
+        additional.push({
+          parentId: extraParentId,
+          predicate: String((extra as Record<string, unknown>).predicate ?? 'relates_to'),
+          confidence: typeof (extra as Record<string, unknown>).confidence === 'number'
+            ? Math.max(0, Math.min(1, (extra as Record<string, number>).confidence))
+            : 0.6,
+        });
+      }
+      return {
+        itemLabel: String(c.itemLabel),
+        parentId: primaryParentId,
+        predicate: String(c.predicate || 'relates_to'),
+        confidence: typeof c.confidence === 'number' ? Math.max(0, Math.min(1, c.confidence)) : 0.7,
+        ...(additional.length > 0 ? { additional } : {}),
+      };
+    });
 
   // ── Build triples ──────────────────────────────────────────────────────────
 
@@ -522,20 +555,38 @@ ${JSON.stringify(extractedItems.map(i => ({ id: i.id, label: i.label, type: i.ty
   extractedItems.forEach(i => labelToType.set(i.label.toLowerCase(), i.type));
   if (categoryTitle) labelToType.set(categoryTitle.toLowerCase(), 'Concept');
 
-  const connectionTriples: RawExtractedTriple[] = connections
-    .filter(c => idToLabel.has(c.parentId))
-    .map(c => {
-      const parentLabel = idToLabel.get(c.parentId)!;
-      const item = extractedItems.find(i => i.label === c.itemLabel);
-      return {
-        subject: parentLabel,
-        predicate: c.predicate,
-        object: c.itemLabel,
-        subjectType: labelToType.get(parentLabel.toLowerCase()) ?? 'Entity',
-        objectType: item?.type ?? 'Entity',
-        confidence: c.confidence,
-      };
+  const connectionTriples: RawExtractedTriple[] = [];
+  for (const c of connections) {
+    if (!idToLabel.has(c.parentId)) continue;
+    const item = extractedItems.find(i => i.label === c.itemLabel);
+    const parentLabel = idToLabel.get(c.parentId)!;
+    connectionTriples.push({
+      subject: parentLabel,
+      predicate: c.predicate,
+      object: c.itemLabel,
+      subjectType: labelToType.get(parentLabel.toLowerCase()) ?? 'Entity',
+      objectType: item?.type ?? 'Entity',
+      confidence: c.confidence,
     });
+
+    // Cross-connection edges: same item, additional existing parents. These
+    // attach a new fact back into the broader graph so expansion produces
+    // connected discoveries, not isolated leaves. Capped at 2 per item by the
+    // parser above, and skipped entirely when the model didn't provide any.
+    for (const extra of c.additional ?? []) {
+      if (!idToLabel.has(extra.parentId)) continue;
+      if (extra.parentId === c.parentId) continue;
+      const extraLabel = idToLabel.get(extra.parentId)!;
+      connectionTriples.push({
+        subject: extraLabel,
+        predicate: extra.predicate,
+        object: c.itemLabel,
+        subjectType: labelToType.get(extraLabel.toLowerCase()) ?? 'Entity',
+        objectType: item?.type ?? 'Entity',
+        confidence: extra.confidence,
+      });
+    }
+  }
 
   const categoryTriple: RawExtractedTriple[] = (categoryTitle && categoryId)
     ? [{

@@ -8,11 +8,15 @@ interface TopNavProps {
   onToggleFocus: () => void;
   onToggleConnection: () => void;
   onSearchOpen: () => void;
+  onFilterOpen: () => void;
+  filterActive: boolean;
   onUploadDocuments: (files: File[]) => void;
   graphLoaded: boolean;
+  overviewMode: boolean;
+  onToggleOverview: () => void;
 }
 
-export function TopNav({ onSearchOpen, onUploadDocuments, graphLoaded }: TopNavProps) {
+export function TopNav({ onSearchOpen, onFilterOpen, filterActive, onUploadDocuments, graphLoaded, overviewMode, onToggleOverview }: TopNavProps) {
   const [showProfile, setShowProfile] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
 
@@ -48,6 +52,29 @@ export function TopNav({ onSearchOpen, onUploadDocuments, graphLoaded }: TopNavP
       {/* Search button — only when graph is loaded */}
       <AnimatePresence>
         {graphLoaded && (
+          <>
+          <motion.button
+            initial={{ opacity: 0, scale: 0.85 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.85 }}
+            transition={{ duration: 0.18 }}
+            onClick={onToggleOverview}
+            className="w-8 h-8 rounded-xl flex items-center justify-center transition-colors hover:bg-accent"
+            style={{
+              background: overviewMode ? 'var(--primary)' : 'var(--secondary)',
+              border: '1px solid var(--border)',
+              color: overviewMode ? 'white' : 'var(--muted-foreground)',
+            }}
+            title={overviewMode ? 'Return to focused view' : 'Show full graph overview'}
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+              <circle cx="4" cy="4" r="2" stroke="currentColor" strokeWidth="1.5" />
+              <circle cx="12" cy="4" r="2" stroke="currentColor" strokeWidth="1.5" />
+              <circle cx="4" cy="12" r="2" stroke="currentColor" strokeWidth="1.5" />
+              <circle cx="12" cy="12" r="2" stroke="currentColor" strokeWidth="1.5" />
+              <path d="M6 4h4M4 6v4M12 6v4M6 12h4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+            </svg>
+          </motion.button>
           <motion.button
             initial={{ opacity: 0, scale: 0.85 }}
             animate={{ opacity: 1, scale: 1 }}
@@ -63,6 +90,31 @@ export function TopNav({ onSearchOpen, onUploadDocuments, graphLoaded }: TopNavP
               <line x1="10" y1="10" x2="14" y2="14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
             </svg>
           </motion.button>
+          <motion.button
+            initial={{ opacity: 0, scale: 0.85 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.85 }}
+            transition={{ duration: 0.18 }}
+            onClick={onFilterOpen}
+            className="w-8 h-8 rounded-xl flex items-center justify-center transition-colors hover:bg-accent relative"
+            style={{
+              background: filterActive ? 'var(--primary)' : 'var(--secondary)',
+              border: '1px solid var(--border)',
+              color: filterActive ? 'white' : 'var(--muted-foreground)',
+            }}
+            title="Filter graph"
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+              <path d="M2 3.5h12L9.5 9v4L6.5 14V9L2 3.5z" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+            </svg>
+            {filterActive && (
+              <span
+                className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full"
+                style={{ background: 'var(--destructive, #ef4444)', boxShadow: '0 0 0 1.5px var(--background)' }}
+              />
+            )}
+          </motion.button>
+          </>
         )}
       </AnimatePresence>
 

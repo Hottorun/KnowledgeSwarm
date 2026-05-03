@@ -17,6 +17,7 @@ interface NodeInputBoxProps {
   onAction: (action: string, prompt: string) => void;
   onClose: () => void;
   onDelete?: () => void;
+  onExpandSummary?: () => void;
   addedByAI?: boolean;
 }
 
@@ -35,7 +36,7 @@ const actions = [
   },
 ];
 
-export function NodeInputBox({ nodeLabel, entityType, relationships = [], position, onAction, onClose, onDelete, addedByAI }: NodeInputBoxProps) {
+export function NodeInputBox({ nodeLabel, entityType, relationships = [], position, onAction, onClose, onDelete, onExpandSummary, addedByAI }: NodeInputBoxProps) {
   const [prompt, setPrompt] = useState('');
   const [aiDescription, setAiDescription] = useState<string | null>(null);
   const [descLoading, setDescLoading] = useState(true);
@@ -222,6 +223,21 @@ export function NodeInputBox({ nodeLabel, entityType, relationships = [], positi
 
         {/* Action buttons */}
         <div className="flex border-t" style={{ borderColor: 'var(--border)' }}>
+          {onExpandSummary && (
+            <button
+              onClick={onExpandSummary}
+              className="flex-1 flex flex-col items-center gap-0.5 py-3 px-2 text-center transition-colors duration-150 hover:bg-accent"
+              title="Open a larger source-backed summary panel"
+            >
+              <span className="text-base">▦</span>
+              <span className="text-[11px] font-semibold leading-tight" style={{ color: 'var(--foreground)' }}>
+                Summary
+              </span>
+              <span className="text-[9px] leading-tight px-1" style={{ color: 'var(--muted-foreground)' }}>
+                Expand view
+              </span>
+            </button>
+          )}
           {actions.map((action) => (
             <button
               key={action.key}

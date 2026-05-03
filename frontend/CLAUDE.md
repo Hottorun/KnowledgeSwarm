@@ -2,7 +2,7 @@
 
 ## Stack
 - React 19 + Vite 7 + TanStack Router (file-based, SSR via TanStack Start)
-- React Flow (`@xyflow/react` v12) for the graph canvas
+- Sigma.js + Graphology for the graph canvas
 - Framer Motion v12 for animations
 - Tailwind CSS v4 with OKLCH color tokens
 - Bun as package manager (`bun install`, `bun run dev`)
@@ -16,14 +16,18 @@ src/
     index.tsx           # Single route — renders <KnowledgeGraphCanvas />
   components/
     knowledge-graph/
-      KnowledgeGraphCanvas.tsx  # ALL graph logic (state, SSE, layout, events)
+      KnowledgeGraphCanvas.tsx  # Top-level orchestrator (state, refs, panels, JSX)
+      useGraphSSE.ts            # SSE event handler — node.created / edge.created / source.created / agent.step
+      useExpansion.ts           # handleNodeAction — expand-subtree queue, context bundle, anchor management
+      layout.ts                 # forceDirectedLayout + resolveOverlaps
+      SigmaGraphView.tsx        # Sigma/Graphology whole-graph renderer
+      presentationGraph.ts      # buildPresentationView, isMainEntityNode, etc.
+      graphTypes.ts             # GraphNode/GraphEdge types + node sizing helpers
       AnimatedBlob.tsx          # Landing blob + LoadingBlob (loading overlay)
-      GraphNode.tsx             # Node renderer; nodeType: root|topic|subtopic|detail
       NodeInputBox.tsx          # Node action popup (Expand, Research, Connections)
       SidePanel.tsx             # Left (TOC) + Right (Reasoning) drawers
       TopNav.tsx                # Header
       EdgeButton.tsx            # Sidebar toggle buttons
-      FloatingEdge.tsx          # Custom edge renderer
       TocDropdown.tsx           # TOC dropdown
       APIKeyModal.tsx           # OpenAI key modal
       types.ts                  # AIReasoningStep, DataSource
@@ -44,7 +48,7 @@ src/
 | `isEmpty` | true until first run is submitted |
 | `isDissolving` | true during blob dissolve + extractFromText call |
 | `isProcessing` | true from submit until layout commits nodes; drives `<LoadingBlob>` |
-| `nodes / edges` | React Flow state (useNodesState / useEdgesState) |
+| `nodes / edges` | Local `GraphNode[]` / `GraphEdge[]` state rendered by Sigma |
 | `runId` | current backend run ID |
 | `reasoningSteps` | agent.step SSE events shown in right panel |
 
@@ -55,8 +59,8 @@ src/
 4. `setIsEmpty(false)`
 5. `extractFromText(runId, text)` — POST that triggers AI extraction (awaited; results come via SSE)
 6. `finally` → `setIsDissolving(false)` (safety fallback)
-7. SSE `node.created` / `edge.created` → buffered in `pendingNodesRef` / `pendingEdgesRef` (NOT committed to React Flow yet)
-8. After burst settles (600ms debounce) → layout runs on full buffer, then `setNodes` + `setEdges` called once, `setIsProcessing(false)`, `fitView()` called
+7. SSE `node.created` / `edge.created` → buffered in `pendingNodesRef` / `pendingEdgesRef`
+8. After burst settles (600ms debounce) → layout runs on full buffer, then `setNodes` + `setEdges` called once, `setIsProcessing(false)`
 9. Nodes appear for the first time already in their final sorted positions
 
 ## Expansion flow (user clicks expand on a node)
@@ -64,10 +68,13 @@ src/
 - SSE events are committed immediately (not buffered) so user sees progress
 - After 600ms debounce → layout re-runs on committed nodes only (no fitView)
 
-## SSE events handled
-- `node.created` → buffered (initial load) or committed immediately (expansion)
-- `edge.created` → buffered (initial load) or committed immediately (expansion)
+## SSE events handled (`useGraphSSE.ts`)
+- `node.created` → buffered (initial load) or committed immediately (expansion / query / append)
+- `edge.created` → buffered (initial load) or committed immediately (expansion / query / append)
+- `source.created` → merge `BackendSource` into the matching edge's `data.sources`
 - `agent.step` / `run.status` → append to reasoningSteps
+
+The SSE handler lives in `useGraphSSE.ts` and is wired into the canvas with `useGraphSSE({ setters, refs, helpers })`. The expansion queue + `handleNodeAction` lives in `useExpansion.ts`. Both hooks receive shared expansion refs (`expansionAnchorRef`, `expansionChildIdxRef`, `expansionDepthRef`, `expansionNewNodesRef`) declared in the canvas — the SSE handler reads them, the expansion queue writes them.
 
 ## Key refs (KnowledgeGraphCanvas.tsx)
 | Ref | Purpose |
@@ -79,21 +86,39 @@ src/
 | `expansionAnchorRef` | Set during node expansion; null during initial load |
 | `layoutDebounceRef` | 600ms debounce timer for layout commit |
 
-## Layout algorithm (in KnowledgeGraphCanvas.tsx, top of file)
+## Layout algorithm (`layout.ts`)
 - `forceDirectedLayout`: Coulomb repulsion + Hooke springs, 450 iterations, root nodes pinned at origin; connected nodes attract, unconnected repel
 - `resolveOverlaps`: AABB iterative collision resolution using actual node dimensions + NODE_GAP=14px, up to 1000 iterations; guarantees zero overlap (user-dragged positions are exempt)
 - Combined as `layout()` — always run as `resolveOverlaps(forceDirectedLayout(nodes, edges))`
+- Run off-main-thread via `src/workers/layout.worker.ts`; the canvas's `runLayoutAsync` posts to it and falls back to sync `layout()` if the worker isn't ready
 
-## Node types & sizing
+## Node types & sizing (`graphTypes.ts` → `nodeDims`)
 ```
-root     → 180×64px, semibold  (depth 0)
-topic    → 150×52px, medium    (depth 1)
-subtopic → 130×46px, medium    (depth 2)
-detail   → 110×40px, regular   (depth 3+)
+root     → 210×76px, semibold, dot 40px  (depth 0)
+topic    → 175×62px, medium,   dot 32px  (depth 1)
+subtopic → 130×46px, medium,   dot 22px  (depth 2)
+detail   → 110×40px, regular,  dot 18px  (depth 3+)
 ```
+Char widths used for label-fit calculations: root 8, topic 7, subtopic 6.5, detail 6 (`charWidths`). Labels wrap past 25 chars (`LABEL_WRAP_AT`). When a description badge is present, the box gets `BADGE_WALL_CLEARANCE=12px` of extra right padding.
 
-## Entity type → color (GraphNode.tsx)
-Company=blue, Person=green, Market=orange, Technology=purple; others mapped similarly.
+## Entity type → color (`SigmaGraphView.tsx`)
+OKLCH soft-pastel palette. Each entity carries `{ dot, glow, tint, text }` — dot is opaque, glow at 22% alpha, tint at 8% alpha, text is a darker shade for legibility. Mapping is *substring* (`description.toLowerCase().includes(key)`), so `Company` matches `"Company"` and `"Holding Company"` alike.
+
+| Type         | Hue (rough)  |
+|--------------|--------------|
+| Company      | cornflower blue (250) |
+| Organization | indigo (280) |
+| Person       | leaf green (148) |
+| Market       | warm gold (68) |
+| Technology   | soft purple (308) |
+| Product      | muted coral (12) |
+| Event        | amber (88) |
+| Location     | teal (190) |
+| Regulation   | muted orange (38) |
+| Document     | sky blue (222) |
+| Concept / Topic / Entity | neutral slate (258) — also the fallback |
+
+Selection / hover / focus state borders/glows come from CSS custom props in `styles.css` (`--kg-glow-root`, `--kg-dot-topic`, etc.) layered with `typeStyles`.
 
 ## AnimatedBlob / LoadingBlob (AnimatedBlob.tsx)
 - Both render a `w-72 h-72` centered shape with two layered divs
@@ -129,7 +154,7 @@ Single route at `/` → `<KnowledgeGraphCanvas>`. Adding routes: create `src/rou
 bun install
 bun run dev          # Vite dev server
 bun run build        # Production build
-bun run typecheck    # tsc --noEmit
+bunx tsc --noEmit    # Type-check only (no `typecheck` script in package.json)
 ```
 
 ## Do not touch

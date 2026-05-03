@@ -1,4 +1,5 @@
 import type { BranchPlan } from '../types';
+import type { CategoryKey } from '../ingest/categories';
 
 export type SpecialistKind =
   | 'finance'
@@ -107,4 +108,77 @@ export function specialistForBranch(branch: BranchPlan): SpecialistProfile {
 
 export function specialistDisplayName(specialist: SpecialistProfile, branch: BranchPlan): string {
   return `${specialist.agentName}:${branch.label}`;
+}
+
+// Mapping from document category → specialist kinds that plausibly extract
+// useful facts for that category. `general` is in every set so we never drop
+// the catch-all extractor — its job is to surface facts that don't fit a
+// narrower specialist.
+const CATEGORY_TO_SPECIALISTS: Record<CategoryKey, ReadonlySet<SpecialistKind>> = {
+  finance:           new Set(['finance', 'risk', 'general']),
+  'hr-people':       new Set(['people', 'general']),
+  legal:             new Set(['legal', 'risk', 'general']),
+  operations:        new Set(['technical', 'risk', 'people', 'general']),
+  'strategy-market': new Set(['market', 'finance', 'general']),
+  technology:        new Set(['technical', 'risk', 'general']),
+  risk:              new Set(['risk', 'finance', 'legal', 'technical', 'general']),
+  other:             new Set(['finance', 'legal', 'technical', 'market', 'people', 'risk', 'general']),
+};
+
+export interface SpecialistRoutingDecision {
+  keptKinds: SpecialistKind[];
+  droppedKinds: SpecialistKind[];
+  source: 'classifier' | 'low-confidence' | 'low-confidence-fallback' | 'category-other';
+}
+
+// Decide which specialist kinds to run given a document classification. The
+// caller can use the returned set to filter `branches`/`specialists` arrays.
+// Conservative gating: if classifier confidence is below `confidenceFloor` or
+// the primary category is `other` (couldn't classify), run all specialists.
+export function decideSpecialistRouting(args: {
+  available: SpecialistKind[];
+  primaryCategory: CategoryKey;
+  secondaryCategories: readonly CategoryKey[];
+  confidence: number;
+  confidenceFloor?: number;
+}): SpecialistRoutingDecision {
+  const confidenceFloor = args.confidenceFloor ?? 0.6;
+
+  if (args.confidence < confidenceFloor) {
+    return {
+      keptKinds: args.available,
+      droppedKinds: [],
+      source: 'low-confidence',
+    };
+  }
+
+  if (args.primaryCategory === 'other') {
+    return {
+      keptKinds: args.available,
+      droppedKinds: [],
+      source: 'category-other',
+    };
+  }
+
+  const relevant = new Set<SpecialistKind>();
+  for (const kind of CATEGORY_TO_SPECIALISTS[args.primaryCategory]) relevant.add(kind);
+  for (const cat of args.secondaryCategories) {
+    for (const kind of CATEGORY_TO_SPECIALISTS[cat] ?? []) relevant.add(kind);
+  }
+
+  const kept = args.available.filter(kind => relevant.has(kind));
+  const dropped = args.available.filter(kind => !relevant.has(kind));
+
+  // Safety net: if filtering would drop everything (e.g. branches happen to
+  // have no overlap with the category's specialists), keep everything rather
+  // than running zero specialists.
+  if (kept.length === 0) {
+    return {
+      keptKinds: args.available,
+      droppedKinds: [],
+      source: 'low-confidence-fallback',
+    };
+  }
+
+  return { keptKinds: kept, droppedKinds: dropped, source: 'classifier' };
 }
