@@ -11,6 +11,7 @@ import { chunkText, buildDocumentSummary } from './ingest/chunker';
 import {
   annotateTriplesForPresentation,
   buildPresentationTriples,
+  splitOversizedSubtrees,
   summarizeDocumentText,
   type DocumentCategoryAssignment,
 } from './ingest/presentation';
@@ -133,6 +134,11 @@ export async function orchestrate(
 
   const allExtractedTriples: Awaited<ReturnType<typeof runSupervisor>> = [];
   const emittedTripleKeys = new Set<string>();
+  // Each entity must be anchored under exactly one category. Once a
+  // `category → contains → entity` triple is emitted for an entity, later
+  // branches that classify the same entity differently are skipped — so the
+  // first branch's vote sticks and entities never gain a second parent.
+  const entitiesWithContainsParent = new Set<string>();
   // Main entity is detected once after the first batch of triples comes in,
   // then reused for the rest of the run so the graph's center stays stable
   // even as more chunks land. Without this, every incremental rebuild could
@@ -179,8 +185,14 @@ export async function orchestrate(
         mainEntityDetection?.entity,
         documentClassifications,
       );
+      const filteredIncrementalPresentation = incrementalPresentation.filter(triple => {
+        if (triple.predicate !== 'contains') return true;
+        if (entitiesWithContainsParent.has(triple.object.id)) return false;
+        entitiesWithContainsParent.add(triple.object.id);
+        return true;
+      });
       const incrementalTriples = normalizeAndDeduplicate(
-        [...incrementalAnnotated, ...incrementalPresentation],
+        [...incrementalAnnotated, ...filteredIncrementalPresentation],
         emittedTripleKeys,
       );
       if (incrementalTriples.length > 0) {
@@ -207,13 +219,20 @@ export async function orchestrate(
       ? await detectMainEntity(runId, annotatedTriples, documentName)
       : fallbackMainEntityFromDocument(documentName);
   }
-  const presentationTriples = buildPresentationTriples(
+  const rawPresentationTriples = buildPresentationTriples(
     annotatedTriples,
     documentName,
     documentSummaries,
     mainEntityDetection.entity,
     documentClassifications,
   );
+  // Run sub-categorization on any parent that has too many direct children.
+  // This is the only place adaptive sub-categorization runs — incremental
+  // streaming uses the flat scaffold so the SSE preview stays cheap. The
+  // final pass then splits oversized subtrees and emits subcategory edges
+  // at higher confidence so the frontend prefers them over the original
+  // category-direct edges via dedupe-by-target.
+  const presentationTriples = await splitOversizedSubtrees(runId, rawPresentationTriples);
   if (presentationTriples.length > 0) {
     await emitAgentEvent(
       runId,
@@ -263,6 +282,16 @@ export async function orchestrate(
   }
 
   const finalNewTriples = finalTriples.filter(triple => {
+    // Subcategory-route triples are allowed to override an earlier
+    // `category → contains → entity` so the deeper subcategory tree wins
+    // when it arrives at run completion. The frontend dedupes contains
+    // edges by target (highest confidence) and subcategory edges carry a
+    // higher confidence (0.92) than the default 0.85.
+    const isSubcategoryRoute = triple.properties?.subcategoryRoute === true;
+    if (triple.predicate === 'contains' && !isSubcategoryRoute) {
+      if (entitiesWithContainsParent.has(triple.object.id)) return false;
+      entitiesWithContainsParent.add(triple.object.id);
+    }
     const key = `${triple.subject.id}|${triple.predicate}|${triple.object.id}`;
     if (emittedTripleKeys.has(key)) return false;
     emittedTripleKeys.add(key);

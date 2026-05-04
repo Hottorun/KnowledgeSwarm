@@ -12,9 +12,94 @@ Company / main entity
 
 Completed items have been removed from this list. Already done: real category/document scaffold emission, basic category/document metadata, frontend preference for real category/document nodes, presentation graph extraction into `presentationGraph.ts`, branch-by-branch graph streaming, main-entity tagging so documents/categories never become the auto-center, MAX_LEVEL_1_NODES cap with "Other Areas" overflow grouping, hidden-neighbor badge fix on the active center, branch-growth entry animations (tiered animDelay for fresh nodes/edges), explicit ViewMode dispatch in `buildPresentationView` (hub / category / document / entity / overview), explicit MainEntityAgent step (`apps/orchestrator/src/agents/mainEntity.ts` — heuristic detection, locked-in once per run, document-name fallback for zero-extraction case, emits `main_entity.start` / `main_entity.selected` / `main_entity.fallback` agent events), `GET /runs/:runId/graph` snapshot endpoint (`apps/api/src/routes/runs.ts` + `loadRunGraph` in `apps/api/src/services/graph.ts` — returns nodes, edges, and sources joined through `edge_sources`; 503 when Supabase unconfigured, 404 when run missing), `DocumentClassifierAgent` (`apps/orchestrator/src/agents/classifier.ts`) — runs in parallel with `decomposeDocument`, returns `{ primaryCategory, secondaryCategories, reason, confidence, source }`, validated against shared `CATEGORY_KEYS` enum (`apps/orchestrator/src/ingest/categories.ts`); presentation builder honours the primary category instead of keyword `dominantCategory`, emits secondary `contains_document` edges at lower confidence, and records `secondaryCategories` + `categorySource` on document nodes; emits `classifier.start` / `classifier.classified` agent events with model→heuristic fallback. Expansion cross-connections (`apps/api/src/services/ai.ts → expandSubtree`) — Pass 2 routing schema now accepts optional `additional` connections per item (max 2, must be a different existing parent than primary); Pass 1 prompt nudges the model to prefer items that link to multiple existing nodes; cross-link triples are emitted alongside the primary parent edge so expansion no longer produces isolated leaves when the research clearly connects an item to additional graph nodes. Specialist output contract (`apps/orchestrator/src/agents/worker.ts`) — worker SYSTEM_PROMPT now requires `properties.category` (validated against shared `CATEGORY_KEYS`) and `properties.importance` (0.0-1.0 with calibrated guidance: 0.85+ headline facts, 0.6-0.85 context, <0.6 trivia); `sources[0].snippet` made required (verbatim quote, max ~280 chars); user message now includes a `Default category for this branch` hint mapped from specialist kind via `specialistKindToCategoryKey`; `presentation.ts → coerceTripleCategory` validates worker-emitted categories and `inferCategory`/`annotateTriplesForPresentation` resolution order is now `worker > document-classifier > keyword-inference`. Richer expansion context retrieval (`frontend/src/components/knowledge-graph/KnowledgeGraphCanvas.tsx → handleNodeAction`) — frontend builds a focused-context bundle for `apiExpandSubtree`: subtree + ancestors + main entity + same-category siblings (top 12 by importance) + same-document siblings (top 12) + globally top-importance nodes (top 8); for graphs ≤ 150 nodes the whole graph is sent. `contextEdges` now spans any edge between two bundle members (not only subtree+ancestor edges), giving Pass 2's routing prompt enough sibling/cross-document candidates to propose `additional` parent connections. Presentation scaffold dedupe (R4) — deleted `apps/api/src/services/presentation.ts`; the orchestrator (`apps/orchestrator/src/ingest/presentation.ts`) is now the single source of truth for main-entity / category / document scaffold emission. The legacy `/ai/runs/:runId/extract` heuristic fallback now persists raw triples only — frontend's `presentationGraph.ts` synthesises a hub view from raw triples when scaffold is absent. Frontend CLAUDE.md refresh (R5) — node sizing table now matches `graphTypes.ts → nodeDims` (root 210×76, topic 175×62, subtopic 130×46, detail 110×40 with explicit dot sizes); entity colour section replaced with the actual OKLCH palette (12 entity types each with dot/glow/tint/text variants, fallback `Concept` slate, substring matching) instead of the stale 4-colour list. Category-aware connectivity repair (Task 13) — `apps/orchestrator/src/agents/graphRepair.ts` AI prompt now ranks predicates: `document → mentions → entity` first, then `category → contains_document → document`, `main_entity → has_business_area → category`, `entity → belongs_to → category`, then concrete domain predicates, with `related_to` as last resort. Deterministic fallback also rewritten: `collectScaffoldNodes` indexes scaffold nodes by `presentationRole`, then `scaffoldBridgeForComponent` routes each orphan via document → category → main_entity in that order before falling back to the legacy `co_mentioned_with`. Bridge triples carry `scaffoldRoute` provenance for audit. Specialist routing by document category (Task 10b) — `apps/orchestrator/src/agents/specialists.ts → decideSpecialistRouting` filters specialists by the classifier's primary + secondary categories using a `CATEGORY_TO_SPECIALISTS` mapping (e.g. `finance → [finance, risk, general]`); `general` is in every set so the catch-all extractor always runs. Conservative gating: when classifier confidence is below 0.6, when `primaryCategory === 'other'`, or when filtering would drop everything, all specialists run as a fallback. `apps/orchestrator/src/index.ts` applies the routing right after `specialistForBranch` mapping; `MetaAgent` emits a `routing` agent event with kept/skipped specialists and routing source (`classifier` / `low-confidence` / `category-other` / `low-confidence-fallback`) for observability.
 
+## Scalable Hierarchy (active — 2026-05-04)
+
+The graph is currently locked at exactly 3 levels: `main_entity → category → entity`. This works for 3-file demos but doesn't scale: a Fortune-500 dropping 1000+ files would produce a Finance category with 5000 children. We need an adaptive hierarchy that grows with the data.
+
+### Target architecture
+
+```
+Level 0: Main entity                                Acme Corp
+Level 1: Top categories (fixed enum, 6)             Finance, HR, Ops, Legal, Risk, Strategy
+Level 2: AI-named sub-categories (emerge bottom-up) Finance → Revenue, Costs, M&A, Risk, …
+Level 3: Document clusters or hierarchical entities Revenue → Q3-2025 Report, …
+                                                    or: Acme → owns → Beta → owns → Gamma
+Level 4+: Leaf entities                             People, dates, amounts, …
+```
+
+Three mechanisms make it scale: (a) hierarchical predicates become real tree edges so ownership/management chains preserve depth, (b) AI sub-categorization runs when any node exceeds ~25 children, (c) progressive disclosure caps rendered children per parent and groups overflow into expandable buckets.
+
+### Phase 1 — Hierarchical predicates as tree edges  ✓ (2026-05-04)
+
+- [x] `HIERARCHICAL_PREDICATES` set in `apps/orchestrator/src/ingest/presentation.ts` covering `owns, contains, subsidiary_of, parent_of, part_of, manages, oversees, leads, reports_to, has_subsidiary, has_division, comprises, includes`
+- [x] `buildHierarchicalParentMap` scans extracted triples, picks highest-confidence parent per child, handles inverse predicates (`subsidiary_of` etc. invert direction), breaks cycles by walking proposed parent chain
+- [x] When emitting Layer 2, entities with a hierarchical parent get `parent_entity → contains → entity`; others fall back to `category → contains → entity`. Triples carry `containsRole: 'hierarchical' | 'category'` and the original `hierarchicalPredicate` for evidence display
+- [x] Skip hierarchical parent if it equals the main entity (don't bypass the category layer for top-level entities)
+- [x] Skip hierarchical parent if it's not in the known entity set (orphan-parent guard)
+- [x] Frontend: no changes — BFS already follows whatever `contains` edges exist; depth 3+ renders for free
+- [ ] Verify with a deeply-nested example (e.g. holding company with subsidiaries) that depths 3, 4, 5 render correctly  ← needs live test
+
+### Phase 2 — Adaptive sub-categorization  ✓ (2026-05-04)
+
+- [x] New orchestrator agent `apps/orchestrator/src/agents/subCategorizer.ts` (Claude Haiku via `supervisorModel`), with stub-mode + on-failure heuristic fallback that groups by entity type
+- [x] `splitOversizedSubtrees(runId, presentationTriples)` in `presentation.ts` — walks every `contains` parent, calls `subCategorize` for any with > 18 children, replaces original edges with `parent → contains → subcategory` + `subcategory → contains → child` at confidence 0.93/0.92 so the frontend dedupe-by-target prefers the deeper route
+- [x] Recursion up to `SUBCATEGORY_MAX_DEPTH = 3` so subcategories that themselves grow large get split again
+- [x] Wired into `apps/orchestrator/src/index.ts` final pass only — incremental SSE keeps the cheap flat scaffold; subcategory layer arrives at run completion
+- [x] Subcategory triples carry `subcategoryRoute: true` so the orchestrator's per-entity contains lock allows them to override earlier `category → contains → entity` edges
+- [x] Frontend recognises subcategory nodes (`presentationRole: 'subcategory'`) — `isSubcategoryNode`, structural styling (slate-550 between category and bucket shades), reveal-mode treatment, and `isStructuralNode` includes them so edge scoring stays sensible
+
+### Phase 3 — Progressive disclosure
+
+- [ ] Frontend: per-parent visible-child cap (default 12)
+- [ ] When a parent has > cap children, render the top-N by importance + an "expand" bucket (`+47 more`) for the rest
+- [ ] Click bucket → expand its children, collapse other open buckets in the same parent (only one expanded at a time per parent to keep the tree breathable)
+- [ ] Animate camera to focus on the expanded subtree
+- [ ] All graph data stays in the underlying graph — only rendering is gated
+- [ ] Existing `bucketCentralFanout` is the starting point; generalize from "only at root" to "at any parent"
+
+### Phase 4 — Document clusters (optional, later)
+
+- [ ] Re-introduce documents as a layer, but only when there are > 5 docs in the same subcategory
+- [ ] AI clusters related docs by topic: `Q1-Q4 2025 Revenue Reports` instead of 4 separate nodes
+- [ ] Documents become an optional intermediate layer between subcategory and entity, only when useful
+- [ ] Cluster node click expands to individual document nodes
+- [ ] Document nodes still don't appear when there are < 5 docs (current behavior preserved for small uploads)
+
+### Why this order
+
+Phase 1 is small but immediately turns the graph from "always 3 levels" to "as deep as your data is". Phase 2 makes it scale-ready without UI changes. Phase 3 is the unlock for actual 10K-node graphs. Phase 4 is a nice-to-have once the rest is stable.
+
 ## UX Redesign — Graph Canvas (next up)
 
 User feedback after live demo (2026-05-03). Address in roughly this order — items higher up are higher impact / more painful right now.
+
+### Status of the in-flight redesign
+
+Already shipped from this redesign cycle:
+
+- [x] uniform-sector radial layout: Acme Corp dead-centre, depth-1 children evenly spaced around the full circle (no longer bottom-heavy from subtree-size weighting)
+- [x] sector inheritance at deeper levels so subtrees can't cross into a sibling's angular slice
+- [x] auto-fit: 1.2s after the last node-count change, Sigma re-runs `animatedReset`
+- [x] reserve 120px bottom padding on the Sigma container so auto-fit clears the floating query bar
+- [x] zoom controls hidden on the empty/landing state
+- [x] overview button removed from `TopNav` (fit-graph in the bottom-right zoom stack covers this)
+- [x] loading indicator persists until handleDataSubmit / handleUploadDocuments's await chain settles (the per-file MetaAgent `completed` event was firing too early in multi-file uploads)
+- [x] labels: depth ≤ 1 forced when totalNodes ≤ 200; deeper nodes defer to Sigma's `labelDensity` collision avoidance; `LABEL_MAX_CHARS=24` truncation
+- [x] QueryBox compact (no chips by default; chips reveal on input focus or scoped answer)
+
+### Known backend bugs (not part of UI redesign — fix later)
+
+- **Duplicate near-identical entity nodes** — the orchestrator's normalizer is emitting separate nodes for label variants that should collapse to one (e.g. `Beta Storage acquisition` vs `Beta Storage Acquisition`, `lithium volatility` vs `Lithium Volatility`). Symptom: in the graph the same concept shows up twice, each with its own subset of edges, so neither variant looks fully connected. Fix candidates: (a) case-fold + whitespace-normalize labels before deduping in `apps/orchestrator/src/ingest/normalizer.ts`, (b) add a fuzzy-match pass that merges very-close labels (`Levenshtein ≤ 2` or normalized-Jaro-Winkler) when their entity types match. Keep one canonical label per merged group.
+
+### Next up — concrete items (priority order)
+
+1. **Active-centre distinct treatment** — the active root currently renders as a near-black filled dot that visually competes with depth-1 colored siblings. Give it a clear ring/glow/outline so it reads as the focal point at first glance. File: `SigmaGraphView.tsx → nodeColor` / `nodeSize` / Sigma node attributes.
+2. **Monochrome / desaturated palette experiment** — replace the current saturated entity-type colors with a single brand color stepped by role/depth. Reintroduce semantic color only with an explicit legend if navigation needs it. File: `SigmaGraphView.tsx → nodeColor` (and the per-type branches inside).
+3. **Initial growth animation** — sequence: center → neighbors fade-in → edges draw → recurse. Today new nodes appear with their parent edges already attached, and existing nodes re-position when batches commit. Approach: keep `animDelay` per-node (already wired by `assignAnimDelays` in `useGraphSSE.ts`), but make Sigma honor it by tweening node opacity and fading edges in *after* both endpoint nodes are visible. Also lock node positions once they've been visible for >N ms so they don't snap during late commits.
+4. **Edge styling by role** — vary stroke weight + opacity. Primary triple edges full weight; scaffold/expand-bridge edges thinner + lower opacity; low-confidence edges fade further. File: `SigmaGraphView.tsx → edgeAttributes`.
+5. **Subtree crowding at depth 2/3** — when a depth-1 node owns a much bigger subtree than its angular slice (e.g. `Documents` with 5 CSV files × N entities), descendants pack into a tight arc and overlap. Options to explore (pick one): (a) push children onto multiple concentric sub-rings inside the parent's slice, (b) extend `bucketCentralFanout` to apply at deeper levels, (c) make ring radius per-subtree scale with sqrt(subtree size) so a fat subtree gets pushed further out.
+6. **Radial label offsets** — labels currently render to the right of every dot, so a node at the left edge has its label running back into the graph. Set Sigma's `labelOffsetX/Y` per node based on the node's angle from origin (outward-pointing offset). File: `SigmaGraphView.tsx → nodeAttributes`.
+7. **Hide zoom-control "fit graph" button** if it overlaps the auto-fit work (decide once #1–#6 are stable; auto-fit may make the manual button redundant for everyday use).
 
 ### Shape & layout
 
@@ -115,12 +200,14 @@ Initial implementation status:
 - the streaming progress affordance now shows the latest swarm phase, active branch, node/edge counts, recent triple count, and source count instead of a generic "Adding to graph" label.
 - React Flow dependency cleanup is complete: frontend graph state now uses local `GraphNode` / `GraphEdge` types in `graphTypes.ts`, the old React Flow node/edge components were removed, and `@xyflow/react` was uninstalled.
 - Sigma readability pass: crowded branch sectors now get more angular spread and distance, node position updates tween in a single batched animation for graphs up to 500 visible nodes, and old React Flow CSS/doc references were cleaned up.
+- UI graph polish pass: Sigma now uses a desaturated/monochrome role palette, edge thickness/opacity varies by role and confidence, zoom/evidence controls are lifted above the query dock, the query shortcuts collapse into a non-occluding bottom dock, the extraction progress pill sits under the top nav instead of over the graph controls, and filters now include entity type/source kind in addition to category/document/importance.
+- Sigma evidence/detail pass: relationship evidence now has clearer source preview cards with scrollable snippets and document click-through, plus copy/export actions for plain text, Markdown, and JSON. Sigma also has renderer-local level-of-detail controls (`essential` / `balanced` / `full`) so large graphs can stay navigable without deleting stored graph data.
+- Growth/active-center polish: SSE animation delays now guarantee nodes appear before their edges, visible nodes become position-sticky after a short settling window to reduce streaming jitter, and the active center gets a renderer-local halo so the focal node reads clearly. Source-kind filters now inspect incident edge evidence instead of only node metadata, so web/document/local filtering reflects actual provenance.
 
 Immediate implementation checklist:
 
-- [ ] improve Sigma evidence UX after real testing: clearer source/document preview and richer export formats for evidence snippets
 - [ ] validate Sigma whole-graph branch spacing with real demo screenshots and adjust constants if screenshots show clutter
-- [ ] dense-graph UX polish: add stronger level-of-detail controls and optional filtering by category/document/importance once real screenshots show where the noise remains
+- [ ] dense-graph UX polish: validate level-of-detail thresholds with real large documents and adjust `essential` / `balanced` caps if needed
 
 ### R1. Decompose KnowledgeGraphCanvas.tsx
 

@@ -21,7 +21,7 @@ import {
 } from './presentationGraph';
 import type { AIReasoningStep, DataSource } from './types';
 import type { NodeRelationship } from './NodeInputBox';
-import { createRun, extractFromText, queryGraph as apiQueryGraph, categorizeNodes, type NodeCategory } from '@/lib/api';
+import { createRun, extractFromText, queryGraph as apiQueryGraph, categorizeNodes, nestLevel1Entities, type NodeCategory } from '@/lib/api';
 import { extractFileText } from '@/lib/pdf';
 import { QueryBox } from './QueryBox';
 import { layout, type GraphLayoutNode } from './layout';
@@ -34,21 +34,6 @@ import {
   hasActiveFilters,
   makeEmptyFilters,
 } from './GraphFilterPanel';
-
-function buildProvisionalCenterNode(runId: string, label: string): GraphNode {
-  return {
-    id: `provisional-center:${runId}`,
-    type: 'graphNode',
-    position: { x: 0, y: 0 },
-    data: {
-      label: label || 'Research Topic',
-      nodeType: 'root',
-      description: 'Research Topic',
-      presentationRole: 'main_entity',
-      provisional: true,
-    } satisfies GraphNodeData,
-  };
-}
 
 function formatPredicateLabel(predicate: string): string {
   return predicate.replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
@@ -249,6 +234,7 @@ function KnowledgeGraphCanvasInner() {
   const expansionDepthRef = useRef<number>(0);
   const layoutDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const edgesRef = useRef<GraphEdge[]>([]);
+  const nestedRunIdsRef = useRef<Set<string>>(new Set());
   const isSwarmExtraction = useRef(false);
   // Set to true while a graph query is in flight so SSE nodes commit immediately
   // without batch buffering — same as expansion mode but anchorless.
@@ -401,6 +387,7 @@ function KnowledgeGraphCanvasInner() {
     placeholderNodesRef.current.clear();
     pendingNodesRef.current.clear();
     pendingEdgesRef.current.clear();
+    nestedRunIdsRef.current.clear();
     userMovedRef.current.clear();
     expansionQueueRef.current.length = 0;
     expansionRunningRef.current = false;
@@ -423,6 +410,8 @@ function KnowledgeGraphCanvasInner() {
       addedAt: new Date(),
     }]);
 
+    let activeRunId: string | null = null;
+
     try {
       // Use the document name (or a short excerpt) as the run topic — never the
       // full document text, which gets stored as the root context and injected
@@ -430,13 +419,12 @@ function KnowledgeGraphCanvasInner() {
       const runTopic = (documentName && documentName !== 'input.txt')
         ? documentName.replace(/\.[^/.]+$/, '')
         : text.slice(0, 80).trim();
-      const activeRunId = await createRun(runTopic);
+      activeRunId = await createRun(runTopic);
       setRunId(activeRunId);
-      const provisionalCenter = buildProvisionalCenterNode(activeRunId, runTopic || 'Research Topic');
-      nodePositionRef.current.set(provisionalCenter.id, provisionalCenter.position);
-      activeNodeIdsRef.current.add(provisionalCenter.id);
-      setNodes([provisionalCenter]);
-      setActiveNodeId(provisionalCenter.id);
+      // No provisional centre node anymore — the LoadingBlob is shown while
+      // the graph is empty, and disappears once the orchestrator emits the
+      // real main_entity. Avoids the brief "first document file as a node"
+      // flash that confused users.
       connectRunStream(activeRunId);
       setIsEmpty(false);
       setIsDissolving(false);
@@ -466,7 +454,6 @@ function KnowledgeGraphCanvasInner() {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Backend extraction failed';
       console.error(message, error);
-      setIsProcessing(false);
       setReasoningSteps(prev => [...prev, {
         id: `error-${Date.now()}`,
         text: message,
@@ -474,9 +461,107 @@ function KnowledgeGraphCanvasInner() {
         type: 'analysis',
       }]);
     } finally {
+      // Clear the loading indicator now — the await chain above only resolves
+      // after each per-file MetaAgent run finishes, so this is the real
+      // "everything is done" signal for the initial run. The level-1 nesting
+      // pass runs from an effect after SSE state has settled into refs.
+      setIsProcessing(false);
       setIsDissolving(false);
     }
   }, [connectRunStream, setNodes, setEdges]);
+
+  // Sort level-1 entities (direct children of the main entity that aren't
+  // themselves categories or documents) into the closest existing category.
+  // The new `category groups entity` triples arrive via SSE and the layout
+  // reroutes the entity under its category at depth 2.
+  const runNestLevel1 = useCallback(async (activeRunId: string) => {
+    const currentNodes = nodesRef.current;
+    const currentEdges = edgesRef.current;
+    const main = currentNodes.find(n => (n.data as GraphNodeData).presentationRole === 'main_entity')
+      ?? currentNodes.find(n => (n.data as GraphNodeData).nodeType === 'root');
+    if (!main) return;
+
+    const isCategory = (node: GraphNode) => {
+      const data = node.data as GraphNodeData;
+      return data.presentationRole === 'category' ||
+        data.presentationRole === 'business_area' ||
+        String(data.description ?? '').toLowerCase() === 'category';
+    };
+    const isDocument = (node: GraphNode) => {
+      const data = node.data as GraphNodeData;
+      if (data.presentationRole === 'document') return true;
+      const desc = String(data.description ?? '').toLowerCase();
+      return desc === 'document';
+    };
+
+    const categories = currentNodes
+      .filter(isCategory)
+      .filter(n => String((n.data as GraphNodeData).label ?? '').trim().toLowerCase() !== 'documents')
+      .map(n => ({ id: n.id, label: (n.data as GraphNodeData).label }));
+    if (categories.length === 0) return;
+
+    const neighbourIds = new Set<string>();
+    for (const e of currentEdges) {
+      if (e.source === main.id) neighbourIds.add(e.target);
+      if (e.target === main.id) neighbourIds.add(e.source);
+    }
+
+    const orphanEntities = currentNodes.filter(n =>
+      neighbourIds.has(n.id) &&
+      !isCategory(n) &&
+      !isDocument(n) &&
+      n.id !== main.id,
+    );
+    if (orphanEntities.length === 0) return;
+
+    const entities = orphanEntities.map(n => {
+      const data = n.data as GraphNodeData;
+      return { id: n.id, label: data.label, type: String(data.description ?? data.nodeType ?? 'Entity') };
+    });
+    const mainLabel = (main.data as GraphNodeData).label;
+
+    setReasoningSteps(prev => [...prev, {
+      id: `nest-${Date.now()}`,
+      text: `Sorting ${entities.length} unsorted entities under ${categories.length} categories…`,
+      timestamp: new Date(),
+      type: 'analysis',
+    }]);
+
+    const result = await nestLevel1Entities(activeRunId, categories, entities, mainLabel);
+    if (result.newTriplesPersisted > 0) {
+      setReasoningSteps(prev => [...prev, {
+        id: `nest-done-${Date.now()}`,
+        text: `Nested ${result.assignments.length} entities under categories.`,
+        timestamp: new Date(),
+        type: 'connection',
+      }]);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!runId || isProcessing || nestedRunIdsRef.current.has(runId)) return;
+    const main = nodes.find(node => isMainEntityNode(node) || (node.data as GraphNodeData).nodeType === 'root');
+    const hasCategory = nodes.some(node => isRealCategoryNode(node));
+    if (!main || !hasCategory || edges.length === 0) return;
+    const nodeById = new Map(nodes.map(node => [node.id, node]));
+    const hasDirectEntity = edges.some(edge => {
+      if (edge.source !== main.id && edge.target !== main.id) return false;
+      const other = nodeById.get(edge.source === main.id ? edge.target : edge.source);
+      return Boolean(other && !isRealCategoryNode(other) && !isRealDocumentNode(other));
+    });
+    if (!hasDirectEntity) return;
+
+    const timer = setTimeout(() => {
+      if (nestedRunIdsRef.current.has(runId)) return;
+      nestedRunIdsRef.current.add(runId);
+      void runNestLevel1(runId).catch(err => {
+        nestedRunIdsRef.current.delete(runId);
+        console.warn('[nestLevel1] failed:', err);
+      });
+    }, 1000);
+
+    return () => clearTimeout(timer);
+  }, [edges.length, isProcessing, nodes, runId, runNestLevel1]);
 
   const handleNodeClick = useCallback((_: React.MouseEvent, node: GraphNode) => {
     setActiveNodeId(node.id);
@@ -760,8 +845,9 @@ function KnowledgeGraphCanvasInner() {
         }]);
       }
     }
-    scheduleAppendModeRelease(8000);
-  }, [connectRunStream, runId, scheduleAppendModeRelease]);
+    appendModeRef.current = false;
+    setIsProcessing(false);
+  }, [connectRunStream, runId]);
 
   // Re-categorize nodes 2s after graph settles (initial load or after expansion)
   useEffect(() => {
@@ -903,7 +989,14 @@ function KnowledgeGraphCanvasInner() {
   // document or scaffold category can never become the auto-center, even if
   // it's the most-connected node in the SSE stream.
   useEffect(() => {
-    if (activeNodeId !== null || nodes.length === 0) return;
+    if (nodes.length === 0) return;
+    const activeNode = activeNodeId ? nodes.find(node => node.id === activeNodeId) : null;
+    const main = nodes.find(node => isMainEntityNode(node) && (node.data as GraphNodeData).provisional !== true);
+    if (main && (!activeNode || isRealDocumentNode(activeNode) || isRealCategoryNode(activeNode))) {
+      setActiveNodeId(main.id);
+      return;
+    }
+    if (activeNodeId !== null) return;
     const center = chooseInitialCenter(nodes, edges);
     if (center) setActiveNodeId(center.id);
   }, [activeNodeId, nodes, edges]);
@@ -925,8 +1018,13 @@ function KnowledgeGraphCanvasInner() {
     () => applyFilters(nodesWithHighlight, edges, filters),
     [nodesWithHighlight, edges, filters],
   );
-  const rendererSourceNodes = filteredRendererGraph.nodes;
-  const rendererSourceEdges = filteredRendererGraph.edges;
+  const hasRealMainEntity = useMemo(
+    () => nodes.some(node => isMainEntityNode(node) && (node.data as GraphNodeData).provisional !== true),
+    [nodes],
+  );
+  const suppressGraphUntilMainEntity = isProcessing && !hasRealMainEntity;
+  const rendererSourceNodes = suppressGraphUntilMainEntity ? [] : filteredRendererGraph.nodes;
+  const rendererSourceEdges = suppressGraphUntilMainEntity ? [] : filteredRendererGraph.edges;
 
   // Defer the array passed to the active renderer so React can interrupt paint
   // during rapid navigation or SSE bursts.
@@ -979,19 +1077,14 @@ function KnowledgeGraphCanvasInner() {
         onFilterOpen={() => setFilterOpen(o => !o)}
         filterActive={hasActiveFilters(filters)}
         onUploadDocuments={handleUploadDocuments}
-        graphLoaded={!isEmpty}
-        overviewMode={showAllNodes}
-        onToggleOverview={() => {
-          setShowAllNodes(prev => !prev);
-          setSelectedNode(null);
-          setInputBoxPos(null);
-        }}
+        graphLoaded={!isEmpty && !suppressGraphUntilMainEntity}
       />
 
       <GraphFilterPanel
         isOpen={filterOpen && !isEmpty}
         onClose={() => setFilterOpen(false)}
         nodes={nodes}
+        edges={edges}
         filters={filters}
         onFiltersChange={setFilters}
         visibleCount={rendererSourceNodes.length}
@@ -1026,16 +1119,16 @@ function KnowledgeGraphCanvasInner() {
       )}
 
       {/* Loading blob — only for the first graph build. Later uploads append in-place. */}
-      <LoadingBlob isVisible={isProcessing && nodes.length === 0} reasoningSteps={reasoningSteps} />
+      <LoadingBlob isVisible={isProcessing && !hasRealMainEntity} reasoningSteps={reasoningSteps} />
 
       <AnimatePresence>
-        {isProcessing && nodes.length > 0 && (
+        {isProcessing && nodes.length > 0 && hasRealMainEntity && (
           <motion.div
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 8 }}
             transition={{ duration: 0.18 }}
-            className="fixed bottom-5 right-5 z-30 flex max-w-[min(360px,calc(100vw-40px))] items-center gap-3 rounded-xl px-3 py-2 text-xs"
+            className="fixed top-16 right-5 z-30 flex max-w-[min(360px,calc(100vw-40px))] items-center gap-3 rounded-xl px-3 py-2 text-xs"
             style={{
               background: 'var(--kg-node-bg)',
               border: '1px solid var(--kg-node-border)',
@@ -1203,7 +1296,7 @@ function KnowledgeGraphCanvasInner() {
 
       {/* Floating query box — appears once the graph is loaded */}
       <AnimatePresence>
-        {!isEmpty && !isProcessing && (
+        {!isEmpty && (
           <QueryBox
             onQuery={handleQuery}
             isQuerying={isQuerying}

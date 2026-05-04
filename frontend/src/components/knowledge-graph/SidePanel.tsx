@@ -4,6 +4,61 @@ import type { AIReasoningStep } from './types';
 import type { GraphEdge, GraphNode, GraphNodeData } from './graphTypes';
 import type { NodeCategory } from '@/lib/api';
 
+function isDocumentNode(node: GraphNode): boolean {
+  const data = node.data as GraphNodeData;
+  if (data.presentationRole === 'document') return true;
+  const desc = String(data.description ?? '').toLowerCase();
+  return desc === 'document';
+}
+
+function DocumentList({
+  nodes,
+  onNodeFocus,
+}: {
+  nodes: GraphNode[];
+  onNodeFocus?: (nodeId: string) => void;
+}) {
+  const docs = nodes.filter(isDocumentNode);
+  if (docs.length === 0) return null;
+  return (
+    <div className="mb-4">
+      <div className="flex items-center justify-between px-2 mb-1.5">
+        <span
+          className="text-[10px] font-semibold uppercase tracking-wider"
+          style={{ color: 'var(--muted-foreground)' }}
+        >
+          Documents
+        </span>
+        <span
+          className="text-[10px] px-1.5 py-0.5 rounded-full font-medium"
+          style={{ background: 'var(--secondary)', color: 'var(--muted-foreground)', border: '1px solid var(--border)' }}
+        >
+          {docs.length}
+        </span>
+      </div>
+      <div className="space-y-0.5">
+        {docs.map(doc => {
+          const label = (doc.data as GraphNodeData).label;
+          return (
+            <button
+              key={doc.id}
+              onClick={() => onNodeFocus?.(doc.id)}
+              className="w-full flex items-center gap-2 text-left rounded-lg px-2 py-1.5 transition-colors hover:bg-accent"
+              style={{ color: 'var(--foreground)' }}
+            >
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none" style={{ color: 'var(--muted-foreground)', flexShrink: 0 }}>
+                <path d="M3 2h7l3 3v9H3V2z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+                <path d="M10 2v3h3" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+              </svg>
+              <span className="flex-1 text-xs truncate" title={label}>{label}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function CategoryList({
   categories,
   nodes,
@@ -303,15 +358,18 @@ export function SidePanel({ side, isOpen, onClose, nodes = [], edges = [], onNod
           {/* Content */}
           <div className="p-5 overflow-y-auto" style={{ height: 'calc(100% - 57px)' }}>
             {isLeft ? (
-              categories.length > 0 ? (
-                <CategoryList categories={categories} nodes={nodes} onFocusMultiple={onFocusMultiple} onNodeFocus={onNodeFocus} />
-              ) : tocRoots.length === 0 ? (
-                <p className="text-xs" style={{ color: 'var(--muted-foreground)' }}>
-                  Build a mind map to see its table of contents here.
-                </p>
-              ) : (
-                <TocTree roots={tocRoots} onNodeFocus={onNodeFocus} />
-              )
+              <>
+                <DocumentList nodes={nodes} onNodeFocus={onNodeFocus} />
+                {categories.length > 0 ? (
+                  <CategoryList categories={categories} nodes={nodes} onFocusMultiple={onFocusMultiple} onNodeFocus={onNodeFocus} />
+                ) : tocRoots.length === 0 ? (
+                  <p className="text-xs" style={{ color: 'var(--muted-foreground)' }}>
+                    Build a mind map to see its table of contents here.
+                  </p>
+                ) : (
+                  <TocTree roots={tocRoots} onNodeFocus={onNodeFocus} />
+                )}
+              </>
             ) : (
               reasoningSteps.length === 0 ? (
                 <p className="text-xs" style={{ color: 'var(--muted-foreground)' }}>

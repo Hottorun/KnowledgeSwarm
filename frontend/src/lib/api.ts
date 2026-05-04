@@ -102,6 +102,29 @@ export async function categorizeNodes(
   }
 }
 
+export interface NestLevel1Result {
+  assignments: Array<{ entityId: string; categoryId: string; confidence: number; reason?: string }>;
+  newTriplesPersisted: number;
+}
+
+export async function nestLevel1Entities(
+  runId: string,
+  categories: Array<{ id: string; label: string }>,
+  entities: Array<{ id: string; label: string; type: string }>,
+  mainEntityLabel?: string,
+): Promise<NestLevel1Result> {
+  const res = await fetch(`${API_BASE}/ai/runs/${runId}/nest-level1`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ categories, entities, mainEntityLabel }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({})) as { error?: string };
+    throw new Error(data.error ?? `Nest request failed (${res.status})`);
+  }
+  return res.json() as Promise<NestLevel1Result>;
+}
+
 export interface NodeRelationship {
   direction: 'out' | 'in';
   predicate: string;

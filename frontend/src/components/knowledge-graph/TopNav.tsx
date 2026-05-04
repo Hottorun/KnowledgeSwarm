@@ -12,11 +12,9 @@ interface TopNavProps {
   filterActive: boolean;
   onUploadDocuments: (files: File[]) => void;
   graphLoaded: boolean;
-  overviewMode: boolean;
-  onToggleOverview: () => void;
 }
 
-export function TopNav({ onSearchOpen, onFilterOpen, filterActive, onUploadDocuments, graphLoaded, overviewMode, onToggleOverview }: TopNavProps) {
+export function TopNav({ onSearchOpen, onFilterOpen, filterActive, onUploadDocuments, graphLoaded }: TopNavProps) {
   const [showProfile, setShowProfile] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
 
@@ -53,28 +51,6 @@ export function TopNav({ onSearchOpen, onFilterOpen, filterActive, onUploadDocum
       <AnimatePresence>
         {graphLoaded && (
           <>
-          <motion.button
-            initial={{ opacity: 0, scale: 0.85 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.85 }}
-            transition={{ duration: 0.18 }}
-            onClick={onToggleOverview}
-            className="w-8 h-8 rounded-xl flex items-center justify-center transition-colors hover:bg-accent"
-            style={{
-              background: overviewMode ? 'var(--primary)' : 'var(--secondary)',
-              border: '1px solid var(--border)',
-              color: overviewMode ? 'white' : 'var(--muted-foreground)',
-            }}
-            title={overviewMode ? 'Return to focused view' : 'Show full graph overview'}
-          >
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-              <circle cx="4" cy="4" r="2" stroke="currentColor" strokeWidth="1.5" />
-              <circle cx="12" cy="4" r="2" stroke="currentColor" strokeWidth="1.5" />
-              <circle cx="4" cy="12" r="2" stroke="currentColor" strokeWidth="1.5" />
-              <circle cx="12" cy="12" r="2" stroke="currentColor" strokeWidth="1.5" />
-              <path d="M6 4h4M4 6v4M12 6v4M6 12h4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-            </svg>
-          </motion.button>
           <motion.button
             initial={{ opacity: 0, scale: 0.85 }}
             animate={{ opacity: 1, scale: 1 }}

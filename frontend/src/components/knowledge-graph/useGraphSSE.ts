@@ -61,7 +61,8 @@ function upsertNodeById(prev: GraphNode[], incoming: GraphNode): GraphNode[] {
 // BFS from root → assign animDelay (seconds) per node/edge so center renders first.
 // Stagger: stepMs = min(400, 2000 / maxDepth) — total animation ≤ 2s for deep graphs,
 // up to 400ms/layer for shallow ones giving a premium 600-1200ms per-layer feel.
-// Edges fire 180ms after their source node so they "draw out" from an appearing node.
+// Edges fire after both endpoint nodes so they "draw out" from visible nodes
+// instead of appearing before their target has faded in.
 function assignAnimDelays(nodes: GraphNode[], edges: GraphEdge[]): { nodes: GraphNode[]; edges: GraphEdge[] } {
   const rootNode = nodes.find(n => (n.data as { nodeType?: string }).nodeType === 'root');
   const depthMap = new Map<string, number>();
@@ -94,7 +95,10 @@ function assignAnimDelays(nodes: GraphNode[], edges: GraphEdge[]): { nodes: Grap
     })),
     edges: edges.map(e => ({
       ...e,
-      data: { ...(e.data ?? {}), animDelay: (depthMap.get(e.source) ?? 0) * stepMs / 1000 + 0.18 },
+      data: {
+        ...(e.data ?? {}),
+        animDelay: Math.max(depthMap.get(e.source) ?? 0, depthMap.get(e.target) ?? 0) * stepMs / 1000 + 0.18,
+      },
     })),
   };
 }
@@ -330,7 +334,9 @@ export function useGraphSSE(opts: UseGraphSSEOptions) {
               if (additions.length === 0) return prev;
               return [...prev, ...additions];
             });
-            setIsProcessing(false);
+            // Don't clear isProcessing here — that's the FIRST batch settling,
+            // not the run completing. The processing indicator should remain
+            // until the orchestrator emits run.completed / run.failed.
           });
         } else {
           // Expansion: re-layout committed nodes off the main thread.
@@ -472,6 +478,11 @@ export function useGraphSSE(opts: UseGraphSSEOptions) {
         if (agentName.includes('Agent') || agentName.includes('Supervisor') || agentName === 'MetaAgent') {
           isSwarmExtraction.current = true;
         }
+        // MetaAgent emits `completed` once per `extractFromText` call, so it's
+        // not a reliable "the whole run is done" signal in multi-file uploads.
+        // The canvas's await chain in handleDataSubmit / handleUploadDocuments
+        // is the authoritative dismiss point — it only resolves once every
+        // extract finishes — so the SSE hook does not clear isProcessing here.
         setReasoningSteps(prev => [...prev, {
           id: `r-${Date.now()}-${prev.length}`,
           text: payload.message ?? `[${agentName || 'System'}] ${eventType}`,
@@ -485,6 +496,25 @@ export function useGraphSSE(opts: UseGraphSSEOptions) {
 
     source.addEventListener('agent.step', addReasoning);
     source.addEventListener('run.status', addReasoning);
+
+    const handleRunDone = (e: MessageEvent) => {
+      try {
+        const envelope = JSON.parse(e.data) as SseEnvelope<{ message?: string; status?: string }>;
+        const eventType = envelope.type;
+        setReasoningSteps(prev => [...prev, {
+          id: `r-${Date.now()}-${prev.length}`,
+          text: envelope.payload?.message ?? (eventType === 'run.failed' ? 'Run failed' : 'Run complete'),
+          timestamp: new Date(envelope.timestamp || Date.now()),
+          type: 'analysis',
+        }]);
+      } catch (err) {
+        console.warn('[SSE] Failed to parse run.* event:', err);
+      }
+      setIsProcessing(false);
+      if (appendModeRef.current) appendModeRef.current = false;
+    };
+    source.addEventListener('run.completed', handleRunDone);
+    source.addEventListener('run.failed', handleRunDone);
   }, [
     setNodes,
     setEdges,

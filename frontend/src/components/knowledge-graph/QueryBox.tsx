@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 
 interface QueryBoxProps {
@@ -52,6 +52,7 @@ export function QueryBox({
   activeScopeType,
 }: QueryBoxProps) {
   const [value, setValue] = useState('');
+  const [focused, setFocused] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const scope = activeScopeLabel
     ? `the active ${activeScopeType ? activeScopeType.toLowerCase() : 'node'} "${activeScopeLabel}"`
@@ -70,11 +71,9 @@ export function QueryBox({
     onQuery(prompt);
   };
 
-  // Focus input on mount
-  useEffect(() => {
-    const timer = setTimeout(() => inputRef.current?.focus(), 400);
-    return () => clearTimeout(timer);
-  }, []);
+  // Show chips when the user is engaged with the input (focused, typing,
+  // or anchored to a specific scope) — otherwise they just occlude the graph.
+  const chipsVisible = focused || value.length > 0 || Boolean(activeScopeLabel && answer);
 
   return (
     <motion.div
@@ -82,8 +81,11 @@ export function QueryBox({
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: 24 }}
       transition={{ duration: 0.35, ease: [0.16, 1, 0.3, 1] }}
-      className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 flex flex-col items-center gap-3"
-      style={{ width: 'min(600px, calc(100vw - 48px))' }}
+      className="fixed inset-x-0 bottom-0 z-40 flex flex-col items-center gap-2 px-4 pb-4 pt-2"
+      style={{
+        background: 'linear-gradient(to top, color-mix(in oklch, var(--kg-canvas) 96%, transparent), color-mix(in oklch, var(--kg-canvas) 72%, transparent), transparent)',
+        pointerEvents: 'none',
+      }}
     >
       {/* Answer bubble */}
       <AnimatePresence>
@@ -94,11 +96,12 @@ export function QueryBox({
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 8, scale: 0.97 }}
             transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
-            className="w-full rounded-2xl p-4 relative"
+            className="w-[min(560px,calc(100vw-48px))] rounded-2xl p-4 relative"
             style={{
               background: 'var(--kg-node-bg)',
               border: '1px solid var(--kg-node-border)',
               boxShadow: 'var(--kg-shadow-md)',
+              pointerEvents: 'auto',
             }}
           >
             {newNodesCount > 0 && (
@@ -134,33 +137,47 @@ export function QueryBox({
         )}
       </AnimatePresence>
 
-      <div className="flex w-full flex-wrap items-center justify-center gap-1.5">
-        {shortcuts.slice(0, activeScopeLabel ? 7 : 4).map(shortcut => (
-          <button
-            key={shortcut.label}
-            type="button"
-            onClick={() => handleShortcut(shortcut.prompt(scope))}
-            disabled={isQuerying}
-            className="rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors disabled:opacity-40 hover:bg-accent"
-            style={{
-              background: 'var(--kg-node-bg)',
-              border: '1px solid var(--kg-node-border)',
-              color: 'var(--muted-foreground)',
-              boxShadow: 'var(--kg-shadow-sm)',
-            }}
+      <AnimatePresence>
+        {chipsVisible && (
+          <motion.div
+            key="chips"
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 6 }}
+            transition={{ duration: 0.18 }}
+            className="flex w-[min(760px,calc(100vw-48px))] items-center justify-start gap-1.5 overflow-x-auto pb-1"
+            style={{ pointerEvents: 'auto' }}
           >
-            {shortcut.label}
-          </button>
-        ))}
-      </div>
+            {shortcuts.slice(0, activeScopeLabel ? 7 : 4).map(shortcut => (
+              <button
+                key={shortcut.label}
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => handleShortcut(shortcut.prompt(scope))}
+                disabled={isQuerying}
+                className="rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors disabled:opacity-40 hover:bg-accent"
+                style={{
+                  background: 'var(--kg-node-bg)',
+                  border: '1px solid var(--kg-node-border)',
+                  color: 'var(--muted-foreground)',
+                  boxShadow: 'var(--kg-shadow-sm)',
+                }}
+              >
+                {shortcut.label}
+              </button>
+            ))}
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Input box */}
       <div
-        className="w-full flex items-center gap-3 rounded-2xl px-4 py-3 transition-shadow"
+        className="flex w-[min(560px,calc(100vw-48px))] items-center gap-3 rounded-2xl px-4 py-3 transition-shadow"
         style={{
           background: 'var(--kg-node-bg)',
           border: '1px solid var(--kg-node-border)',
           boxShadow: 'var(--kg-shadow-md)',
+          pointerEvents: 'auto',
         }}
       >
         {/* Icon */}
@@ -181,6 +198,8 @@ export function QueryBox({
           value={value}
           onChange={e => setValue(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter') handleSubmit(); }}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
           disabled={isQuerying}
         />
 
@@ -231,10 +250,6 @@ export function QueryBox({
         </motion.button>
       </div>
 
-      {/* Hint */}
-      <p className="text-xs opacity-30 pb-1" style={{ color: 'var(--foreground)' }}>
-        Press Enter to research · new connections appear in graph
-      </p>
     </motion.div>
   );
 }

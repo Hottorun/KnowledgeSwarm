@@ -1,5 +1,6 @@
 import type { GraphNode, Triple } from '../types';
 import { CATEGORIES, type CategoryKey } from './categories';
+import { subCategorize, memberInputFromNode } from '../agents/subCategorizer';
 
 interface CategorySummary {
   overview: string;
@@ -53,19 +54,21 @@ export function buildPresentationTriples(
   };
 
   const triplesByCategory = new Map<CategoryKey, Triple[]>();
-  const triplesByDocument = new Map<string, Triple[]>();
 
   for (const triple of extractedTriples) {
     const documentName = getDocumentName(triple, fallbackDocumentName);
     const assigned = documentClassifications.get(documentName)?.primaryCategory;
-    const category = assigned ?? inferCategory(triple);
+    const workerCategory = coerceTripleCategory(triple.properties?.category);
+    const category = workerCategory ?? assigned ?? inferCategory(triple);
     triplesByCategory.set(category, [...(triplesByCategory.get(category) ?? []), triple]);
-    triplesByDocument.set(documentName, [...(triplesByDocument.get(documentName) ?? []), triple]);
   }
 
   const presentationTriples: Triple[] = [];
   const usedCategoryKeys = [...triplesByCategory.keys()];
 
+  // Layer 1: main entity → category. These edges create the depth-1 ring of
+  // category nodes around the main entity. Every entity ultimately belongs
+  // under one of these categories.
   for (const categoryKey of usedCategoryKeys) {
     const categoryTriples = triplesByCategory.get(categoryKey) ?? [];
     const categoryNode = categoryNodeFor(categoryKey, summarizeCategoryBranch(categoryKey, categoryTriples, fallbackDocumentName));
@@ -82,97 +85,277 @@ export function buildPresentationTriples(
     });
   }
 
-  const documentNames = [...triplesByDocument.keys()].map(cleanDocumentName);
-  presentationTriples.push({
-    subject: mainEntity,
-    predicate: 'has_business_area',
-    object: documentsCategoryNode(documentNames),
-    confidence: 0.95,
-    properties: {
-      presentation: true,
-      category: 'documents',
-      importance: 0.94,
-    },
-  });
+  // Hierarchical parents — derived from worker-extracted predicates that
+  // imply structural containment (`X owns Y`, `X manages Y`, etc.). When
+  // present, the entity gets nested under its parent inside the tree
+  // instead of attaching directly to its category. This produces depth >= 3
+  // for ownership / org-chart / product-breakdown chains and lets the graph
+  // grow with the data instead of staying capped at 3 levels.
+  const hierarchicalParent = buildHierarchicalParentMap(extractedTriples, mainEntity.id);
 
-  for (const [documentName, documentTriples] of triplesByDocument) {
-    const assignment = documentClassifications.get(documentName);
-    const category = assignment?.primaryCategory ?? dominantCategory(documentTriples);
-    const documentNode = documentNodeFor(
-      documentName,
-      category,
-      documentSummaries.get(documentName) || summarizeDocumentEvidence(documentTriples),
-      assignment,
-    );
-    const categoryNode = categoryNodeFor(category, summarizeCategoryBranch(category, triplesByCategory.get(category) ?? documentTriples, fallbackDocumentName));
-
-    presentationTriples.push({
-      subject: documentsCategoryNode(documentNames),
-      predicate: 'contains_document',
-      object: documentNode,
-      confidence: 0.95,
-      sources: documentSource(documentName),
-      properties: {
-        presentation: true,
-        category: 'documents',
-        importance: 0.9,
-      },
-    });
-
-    presentationTriples.push({
-      subject: categoryNode,
-      predicate: 'contains_document',
-      object: documentNode,
-      confidence: 0.9,
-      sources: documentSource(documentName),
-      properties: {
-        presentation: true,
-        category,
-        importance: 0.88,
-      },
-    });
-
-    // Secondary categories from the classifier — link the document to each
-    // additional area at lower confidence so it shows up under multiple
-    // business areas without dominating any of them.
-    for (const secondary of assignment?.secondaryCategories ?? []) {
-      if (secondary === category) continue;
-      const secondaryNode = categoryNodeFor(
-        secondary,
-        summarizeCategoryBranch(secondary, triplesByCategory.get(secondary) ?? documentTriples, fallbackDocumentName),
-      );
-      presentationTriples.push({
-        subject: secondaryNode,
-        predicate: 'contains_document',
-        object: documentNode,
-        confidence: 0.7,
-        sources: documentSource(documentName),
-        properties: {
-          presentation: true,
-          category: secondary,
-          importance: 0.74,
-          secondary: true,
-        },
-      });
+  // Layer 2: category → contains → entity, OR parent_entity → contains →
+  // entity when the entity has a hierarchical predicate (owns, manages,
+  // part_of, etc.) pointing at it. Each entity is anchored under exactly one
+  // parent so the tree stays acyclic and BFS produces a strict tree layout.
+  // Document provenance travels with each triple via `sources`.
+  const entityCategoryVotes = new Map<string, { node: GraphNode; votes: Map<CategoryKey, number> }>();
+  for (const [categoryKey, categoryTriples] of triplesByCategory) {
+    for (const triple of categoryTriples) {
+      for (const node of [triple.subject, triple.object]) {
+        if (node.id === mainEntity.id) continue;
+        const type = node.type.toLowerCase();
+        if (type === 'category' || type === 'document') continue;
+        const entry = entityCategoryVotes.get(node.id) ?? { node, votes: new Map() };
+        entry.votes.set(categoryKey, (entry.votes.get(categoryKey) ?? 0) + 1);
+        entityCategoryVotes.set(node.id, entry);
+      }
     }
+  }
 
-    for (const node of topDocumentNodes(documentTriples, mainEntity.id, 24)) {
+  const entitiesByCategory = new Map<CategoryKey, GraphNode[]>();
+  for (const { node, votes } of entityCategoryVotes.values()) {
+    let bestKey: CategoryKey | null = null;
+    let bestVotes = -1;
+    for (const [key, count] of votes) {
+      if (count > bestVotes) { bestVotes = count; bestKey = key; }
+    }
+    if (!bestKey) continue;
+    const list = entitiesByCategory.get(bestKey) ?? [];
+    list.push(node);
+    entitiesByCategory.set(bestKey, list);
+  }
+
+  // Build a lookup from id → category for routing decisions below.
+  const categoryByEntityId = new Map<string, CategoryKey>();
+  for (const [categoryKey, list] of entitiesByCategory) {
+    for (const node of list) categoryByEntityId.set(node.id, categoryKey);
+  }
+
+  // For every entity, decide its single tree parent. Hierarchical parents
+  // win when (a) the parent isn't the main entity itself (we don't want to
+  // skip the category layer for top-level entities) and (b) the parent is
+  // resolvable in the current entity set. Otherwise fall back to the
+  // entity's voted category. This produces depth-2 edges for top-level
+  // entities and depth-3+ edges for owned / managed / nested entities.
+  const allKnownEntityIds = new Set<string>([...entityCategoryVotes.keys()]);
+  for (const categoryKey of usedCategoryKeys) {
+    const members = entitiesByCategory.get(categoryKey) ?? [];
+    const categoryTriples = triplesByCategory.get(categoryKey) ?? [];
+    const categoryNode = categoryNodeFor(categoryKey, summarizeCategoryBranch(categoryKey, categoryTriples, fallbackDocumentName));
+    const ranked = rankMemberNodes(members, categoryTriples).slice(0, 24);
+    for (const node of ranked) {
+      const documentName = firstDocumentName(categoryTriples, node.id, fallbackDocumentName);
+      const parentInfo = hierarchicalParent.get(node.id);
+      const useHierarchicalParent = parentInfo
+        && parentInfo.parent.id !== mainEntity.id
+        && allKnownEntityIds.has(parentInfo.parent.id);
+
+      const subject = useHierarchicalParent ? parentInfo!.parent : categoryNode;
+      const role = useHierarchicalParent ? 'hierarchical' : 'category';
       presentationTriples.push({
-        subject: documentNode,
-        predicate: 'mentions',
+        subject,
+        predicate: 'contains',
         object: node,
-        confidence: 0.85,
-        sources: documentSource(documentName),
+        confidence: useHierarchicalParent ? Math.max(0.85, parentInfo!.confidence) : 0.85,
+        sources: documentName ? documentSource(documentName) : undefined,
         properties: {
           presentation: true,
-          category,
+          category: categoryKey,
           importance: 0.78,
+          containsRole: role,
+          ...(useHierarchicalParent ? { hierarchicalPredicate: parentInfo!.predicate } : {}),
+          documentName,
         },
       });
     }
   }
 
   return presentationTriples;
+}
+
+// When a parent has more than this many direct children, the
+// SubCategorizerAgent splits them into 3–7 named subcategories so the tree
+// stays readable as the data grows.
+const SUBCATEGORY_FANOUT_THRESHOLD = 18;
+const SUBCATEGORY_MAX_DEPTH = 3;
+
+// Walk every parent in `presentationTriples` and, for any whose
+// `contains` fanout exceeds the threshold, ask the SubCategorizerAgent to
+// group its children into 3–7 named subcategories. Replaces the original
+// `parent → contains → child` edges with `parent → contains → subcategory`
+// + `subcategory → contains → child`. Recurses on subcategories that
+// themselves grow too large, up to SUBCATEGORY_MAX_DEPTH layers deep.
+//
+// Subcategory contains-edges are emitted at confidence 0.92 (vs the 0.85
+// default) so the frontend's dedupe-by-target keeps the deeper route when
+// both edges arrive over SSE — see `filterToScaffoldEdges` in the renderer.
+export async function splitOversizedSubtrees(
+  runId: string,
+  presentationTriples: Triple[],
+): Promise<Triple[]> {
+  let working = [...presentationTriples];
+  for (let depth = 0; depth < SUBCATEGORY_MAX_DEPTH; depth++) {
+    const childrenByParent = new Map<string, { parent: GraphNode; children: GraphNode[]; triples: Triple[] }>();
+    for (const triple of working) {
+      if (triple.predicate !== 'contains') continue;
+      const entry = childrenByParent.get(triple.subject.id) ?? {
+        parent: triple.subject,
+        children: [],
+        triples: [],
+      };
+      entry.children.push(triple.object);
+      entry.triples.push(triple);
+      childrenByParent.set(triple.subject.id, entry);
+    }
+
+    let changed = false;
+    const replacements: Triple[] = [];
+    const dropTripleKeys = new Set<string>();
+
+    for (const [parentId, entry] of childrenByParent) {
+      if (entry.children.length <= SUBCATEGORY_FANOUT_THRESHOLD) continue;
+      const parentLabel = entry.parent.label || parentId;
+      const groups = await subCategorize(
+        runId,
+        parentLabel,
+        entry.children.map(memberInputFromNode),
+      );
+      if (groups.length <= 1) continue;
+
+      changed = true;
+      const childById = new Map(entry.children.map(c => [c.id, c]));
+      for (const original of entry.triples) {
+        dropTripleKeys.add(`${original.subject.id}|contains|${original.object.id}`);
+      }
+
+      for (const group of groups) {
+        const subcategoryNode = subcategoryNodeFor(parentId, group.name, parentLabel);
+        replacements.push({
+          subject: entry.parent,
+          predicate: 'contains',
+          object: subcategoryNode,
+          confidence: 0.93,
+          properties: {
+            presentation: true,
+            subcategoryRoute: true,
+            parentCategoryId: parentId,
+            importance: 0.86,
+          },
+        });
+        for (const memberId of group.memberIds) {
+          const child = childById.get(memberId);
+          if (!child) continue;
+          replacements.push({
+            subject: subcategoryNode,
+            predicate: 'contains',
+            object: child,
+            confidence: 0.92,
+            properties: {
+              presentation: true,
+              subcategoryRoute: true,
+              subcategoryName: group.name,
+              parentCategoryId: parentId,
+              importance: 0.8,
+            },
+          });
+        }
+      }
+    }
+
+    if (!changed) break;
+    working = working.filter(triple => {
+      const key = `${triple.subject.id}|${triple.predicate}|${triple.object.id}`;
+      return !dropTripleKeys.has(key);
+    });
+    working.push(...replacements);
+  }
+
+  return working;
+}
+
+function subcategoryNodeFor(parentId: string, groupName: string, parentLabel: string): GraphNode {
+  const parentSlug = parentId.replace(/^[^:]+:/, '');
+  const groupSlug = groupName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'group';
+  return {
+    id: `subcategory:${parentSlug}:${groupSlug}`,
+    label: groupName,
+    type: 'Subcategory',
+    properties: {
+      presentationRole: 'subcategory',
+      parentCategoryId: parentId,
+      parentCategoryLabel: parentLabel,
+    },
+  };
+}
+
+const HIERARCHICAL_PREDICATES = new Set<string>([
+  'owns',
+  'contains',
+  'subsidiary_of',
+  'parent_of',
+  'part_of',
+  'manages',
+  'oversees',
+  'leads',
+  'reports_to',
+  'has_subsidiary',
+  'has_division',
+  'comprises',
+  'includes',
+]);
+
+interface HierarchicalParent {
+  parent: GraphNode;
+  predicate: string;
+  confidence: number;
+}
+
+// For each entity that appears as the *object* of a hierarchical predicate,
+// pick the highest-confidence subject as its tree parent. Inverse predicates
+// (`subsidiary_of`, `part_of`, `reports_to`) are handled by swapping which
+// end becomes the parent. Cycles are broken by visiting in confidence order
+// — once an entity has a parent, later candidates are ignored.
+function buildHierarchicalParentMap(
+  triples: Triple[],
+  mainEntityId: string,
+): Map<string, HierarchicalParent> {
+  const inverse = new Set<string>(['subsidiary_of', 'part_of', 'reports_to']);
+  type Candidate = { childId: string; parent: GraphNode; predicate: string; confidence: number };
+  const candidates: Candidate[] = [];
+  for (const triple of triples) {
+    const predicate = triple.predicate.toLowerCase().replace(/\s+/g, '_');
+    if (!HIERARCHICAL_PREDICATES.has(predicate)) continue;
+    const isInverse = inverse.has(predicate);
+    const child = isInverse ? triple.subject : triple.object;
+    const parent = isInverse ? triple.object : triple.subject;
+    if (child.id === parent.id) continue;
+    if (child.id === mainEntityId) continue;
+    candidates.push({
+      childId: child.id,
+      parent,
+      predicate,
+      confidence: triple.confidence ?? 0.75,
+    });
+  }
+  candidates.sort((a, b) => b.confidence - a.confidence);
+
+  const result = new Map<string, HierarchicalParent>();
+  for (const c of candidates) {
+    if (result.has(c.childId)) continue;
+    // Cycle guard: walk up the proposed parent's chain — if it leads back
+    // to the candidate child, skip this candidate.
+    let walker: string | undefined = c.parent.id;
+    let cycle = false;
+    const visited = new Set<string>();
+    while (walker && !visited.has(walker)) {
+      visited.add(walker);
+      if (walker === c.childId) { cycle = true; break; }
+      walker = result.get(walker)?.parent.id;
+    }
+    if (cycle) continue;
+    result.set(c.childId, { parent: c.parent, predicate: c.predicate, confidence: c.confidence });
+  }
+  return result;
 }
 
 export function annotateTriplesForPresentation(
@@ -498,12 +681,27 @@ function summarizeDocumentEvidence(triples: Triple[]): string {
     .join(' ');
 }
 
-function topDocumentNodes(triples: Triple[], mainEntityId: string, limit: number): GraphNode[] {
+function rankMemberNodes(members: GraphNode[], categoryTriples: Triple[]): GraphNode[] {
+  const scoreById = new Map<string, number>();
+  for (const triple of categoryTriples) {
+    for (const node of [triple.subject, triple.object]) {
+      const current = scoreById.get(node.id) ?? 0;
+      scoreById.set(node.id, current + (triple.confidence ?? 0.75) + inferImportance(triple) + nodeImportanceBonus(node));
+    }
+  }
+  return [...members].sort((a, b) => (scoreById.get(b.id) ?? 0) - (scoreById.get(a.id) ?? 0));
+}
+
+function topMemberNodes(triples: Triple[], mainEntityId: string, limit: number): GraphNode[] {
   const scores = new Map<string, { node: GraphNode; score: number }>();
 
   for (const triple of triples) {
     for (const node of [triple.subject, triple.object]) {
       if (node.id === mainEntityId) continue;
+      // Skip scaffold structure — categories and documents must never become
+      // members of another category.
+      const type = node.type.toLowerCase();
+      if (type === 'category' || type === 'document') continue;
       const current = scores.get(node.id) ?? { node, score: 0 };
       current.score += (triple.confidence ?? 0.75) + inferImportance(triple) + nodeImportanceBonus(node);
       scores.set(node.id, current);
@@ -514,6 +712,16 @@ function topDocumentNodes(triples: Triple[], mainEntityId: string, limit: number
     .sort((a, b) => b.score - a.score)
     .slice(0, limit)
     .map(item => item.node);
+}
+
+function firstDocumentName(triples: Triple[], nodeId: string, fallback: string): string | undefined {
+  for (const triple of triples) {
+    if (triple.subject.id === nodeId || triple.object.id === nodeId) {
+      const name = getDocumentName(triple, fallback);
+      if (name) return name;
+    }
+  }
+  return undefined;
 }
 
 function inferImportance(triple: Triple): number {

@@ -777,6 +777,96 @@ export interface NodeCategory {
   nodeIds: string[];
 }
 
+// ── Nest-level-1 entities under existing categories ─────────────────────────
+// After extraction, many entities end up as direct depth-1 children of the
+// main entity because the worker emitted `mainEntity → predicate → entity`
+// triples without a category context. The graph's level-1 ring becomes a
+// flat mix of categories AND entities. This call asks the LLM to assign
+// each loose entity to the most appropriate existing category, and emits a
+// `category groups entity` triple for each so the layout BFS can re-route
+// the entity under its category.
+
+export interface NestEntitiesInput {
+  categories: Array<{ id: string; label: string }>;
+  entities: Array<{ id: string; label: string; type: string }>;
+  mainEntityLabel?: string;
+}
+
+export interface NestEntityAssignment {
+  entityId: string;
+  categoryId: string;
+  confidence: number;
+  reason?: string;
+}
+
+export interface NestEntitiesResult {
+  assignments: NestEntityAssignment[];
+  newTriples: RawExtractedTriple[];
+}
+
+export async function nestEntitiesUnderCategories(input: NestEntitiesInput): Promise<NestEntitiesResult> {
+  if (!input.categories.length || !input.entities.length) {
+    return { assignments: [], newTriples: [] };
+  }
+  const cappedEntities = input.entities.slice(0, 100);
+  const categoryList = input.categories.map(c => `${c.id} | ${c.label}`).join('\n');
+  const entityList = cappedEntities.map(e => `${e.id} | ${e.label} (${e.type})`).join('\n');
+
+  let parsed: { assignments?: Array<{ entityId?: string; categoryId?: string; confidence?: number; reason?: string }> } = {};
+  try {
+    const raw = await callOpenAI([
+      {
+        role: 'system',
+        content: `You are a knowledge graph organiser. Each entity must be assigned to the single most relevant category from the provided list.
+Rules:
+- Use the exact ids provided, do not invent new ones.
+- Every entity gets exactly one category assignment.
+- If no category clearly fits, pick the closest match — every entity must be placed.
+- Output ONLY valid JSON: { "assignments": [{ "entityId": string, "categoryId": string, "confidence": number, "reason": string }] }`,
+      },
+      {
+        role: 'user',
+        content: `Main entity context: ${input.mainEntityLabel ?? 'unspecified'}
+
+Available categories (id | label):
+${categoryList}
+
+Entities to place (id | label (type)):
+${entityList}`,
+      },
+    ], { jsonMode: true, temperature: 0.2 });
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    console.warn('[nestEntitiesUnderCategories] LLM call failed:', err);
+    return { assignments: [], newTriples: [] };
+  }
+
+  const categoryById = new Map(input.categories.map(c => [c.id, c]));
+  const entityById = new Map(cappedEntities.map(e => [e.id, e]));
+  const assignments: NestEntityAssignment[] = [];
+  const newTriples: RawExtractedTriple[] = [];
+
+  for (const a of parsed.assignments ?? []) {
+    if (!a.entityId || !a.categoryId) continue;
+    const cat = categoryById.get(a.categoryId);
+    const ent = entityById.get(a.entityId);
+    if (!cat || !ent) continue;
+    const confidence = typeof a.confidence === 'number' ? Math.max(0, Math.min(1, a.confidence)) : 0.7;
+    assignments.push({ entityId: ent.id, categoryId: cat.id, confidence, reason: a.reason });
+    newTriples.push({
+      subject: cat.label,
+      predicate: 'groups',
+      object: ent.label,
+      subjectType: 'Category',
+      objectType: ent.type,
+      confidence,
+      properties: { reason: a.reason ?? '', nested: true },
+    });
+  }
+
+  return { assignments, newTriples };
+}
+
 export async function categorizeNodes(
   nodes: Array<{ id: string; label: string; type: string }>,
 ): Promise<NodeCategory[]> {

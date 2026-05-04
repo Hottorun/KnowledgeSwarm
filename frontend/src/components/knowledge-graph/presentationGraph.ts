@@ -104,7 +104,9 @@ export function isPresentationNodeId(id: string | null | undefined): boolean {
 export function isRealCategoryNode(node: GraphNode | undefined): boolean {
   if (!node) return false;
   const data = node.data as GraphNodeData;
-  return data.description === 'Category' || data.presentationRole === 'business_area';
+  return data.description === 'Category' ||
+    data.presentationRole === 'business_area' ||
+    data.presentationRole === 'category';
 }
 
 export function isRealDocumentNode(node: GraphNode | undefined): boolean {

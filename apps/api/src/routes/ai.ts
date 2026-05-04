@@ -11,6 +11,7 @@ import {
   extractTriplesFromChunk,
   describeNode,
   categorizeNodes,
+  nestEntitiesUnderCategories,
   isOpenAIConfigured,
   setRuntimeOpenAIKey,
   validateKeyFormat,
@@ -271,6 +272,48 @@ const categorizeSchema = z.object({
     label: z.string(),
     type: z.string().optional().default('Entity'),
   })),
+});
+
+const nestLevel1Schema = z.object({
+  categories: z.array(z.object({ id: z.string(), label: z.string() })).min(1),
+  entities: z.array(z.object({
+    id: z.string(),
+    label: z.string(),
+    type: z.string().optional().default('Entity'),
+  })).min(1),
+  mainEntityLabel: z.string().optional(),
+});
+
+router.post('/runs/:runId/nest-level1', async (req: Request, res: Response) => {
+  try {
+    const runId = String(req.params.runId);
+    const { categories, entities, mainEntityLabel } = nestLevel1Schema.parse(req.body);
+
+    if (!isOpenAIConfigured()) {
+      return res.status(503).json({ error: 'AI not configured — set OPENAI_API_KEY or add a key via the key modal' });
+    }
+
+    await emit(runId, 'NestingAgent', 'started', `Sorting ${entities.length} entities into ${categories.length} categories`);
+
+    const result = await nestEntitiesUnderCategories({
+      categories,
+      entities: entities.map(e => ({ id: e.id, label: e.label, type: e.type || 'Entity' })),
+      mainEntityLabel,
+    });
+
+    const triples = normalizeExtractedTriples('NestingAgent', result.newTriples);
+    for (const triple of triples) {
+      await persistTriple(runId, triple);
+    }
+
+    await emit(runId, 'NestingAgent', 'completed', `Nested ${result.assignments.length} entities under categories`);
+    return res.json({
+      assignments: result.assignments,
+      newTriplesPersisted: triples.length,
+    });
+  } catch (err) {
+    return handleRouteError(res, err, 'Nesting failed');
+  }
 });
 
 router.post('/categorize-nodes', async (req: Request, res: Response) => {
