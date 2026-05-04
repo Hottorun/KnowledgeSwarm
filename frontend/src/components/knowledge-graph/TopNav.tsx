@@ -94,6 +94,17 @@ export function TopNav({ onSearchOpen, onFilterOpen, filterActive, onUploadDocum
         )}
       </AnimatePresence>
 
+      {/* Divider between exploration controls (search/filter) and document
+          actions (upload). Only when graph is loaded so the empty state
+          stays uncluttered. */}
+      {graphLoaded && (
+        <span
+          aria-hidden
+          className="mx-1 h-5 w-px"
+          style={{ background: 'var(--border)' }}
+        />
+      )}
+
       {/* Upload documents button — only when graph is loaded */}
       <AnimatePresence>
         {graphLoaded && (
@@ -131,6 +142,7 @@ export function TopNav({ onSearchOpen, onFilterOpen, filterActive, onUploadDocum
             background: 'var(--secondary)',
             border: '1px solid var(--border)',
           }}
+          title="Profile and settings"
         >
           <span className="text-xs font-medium" style={{ color: 'var(--muted-foreground)' }}>U</span>
         </button>

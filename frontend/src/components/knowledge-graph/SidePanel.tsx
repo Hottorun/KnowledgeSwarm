@@ -263,6 +263,178 @@ function TocTree({ roots, onNodeFocus }: { roots: TocNode[]; onNodeFocus?: (id: 
   );
 }
 
+function LeftTabButton({
+  active,
+  onClick,
+  label,
+  badge,
+  onDismiss,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+  badge?: number;
+  onDismiss?: () => void;
+}) {
+  return (
+    <div
+      className="flex items-center rounded-lg overflow-hidden text-xs transition-colors"
+      style={{
+        background: active ? 'var(--secondary)' : 'transparent',
+        border: `1px solid ${active ? 'var(--border)' : 'transparent'}`,
+      }}
+    >
+      <button
+        onClick={onClick}
+        className="px-3 py-1.5 font-medium transition-colors hover:bg-accent"
+        style={{ color: active ? 'var(--foreground)' : 'var(--muted-foreground)' }}
+      >
+        {label}
+        {badge !== undefined && (
+          <span
+            className="ml-1.5 px-1.5 py-0.5 rounded-full text-[10px] font-medium"
+            style={{
+              background: active ? 'var(--background)' : 'var(--secondary)',
+              color: 'var(--muted-foreground)',
+              border: '1px solid var(--border)',
+            }}
+          >
+            {badge}
+          </span>
+        )}
+      </button>
+      {onDismiss && active && (
+        <button
+          onClick={onDismiss}
+          className="px-2 py-1.5 transition-colors hover:bg-accent"
+          style={{ color: 'var(--muted-foreground)' }}
+          title="Clear selection"
+        >
+          ✕
+        </button>
+      )}
+    </div>
+  );
+}
+
+function SelectedNodeContent({
+  node,
+  onNodeFocus,
+}: {
+  node: SelectedNodeInfo;
+  onNodeFocus?: (id: string) => void;
+}) {
+  return (
+    <div className="space-y-4">
+      <div>
+        {node.type && (
+          <div
+            className="text-[10px] font-semibold uppercase tracking-wider mb-1"
+            style={{ color: 'var(--muted-foreground)' }}
+          >
+            {node.type}
+          </div>
+        )}
+        <h2
+          className="text-base font-semibold leading-tight break-words"
+          style={{ color: 'var(--foreground)' }}
+        >
+          {node.label}
+        </h2>
+      </div>
+
+      {node.description && (
+        <p
+          className="text-xs leading-relaxed"
+          style={{ color: 'var(--muted-foreground)' }}
+        >
+          {node.description}
+        </p>
+      )}
+
+      {node.relationships.length > 0 && (
+        <div>
+          <div
+            className="flex items-center justify-between mb-2 text-[10px] uppercase tracking-wider font-semibold"
+            style={{ color: 'var(--muted-foreground)' }}
+          >
+            <span>Connections</span>
+            <span
+              className="px-1.5 py-0.5 rounded-full"
+              style={{ background: 'var(--secondary)', border: '1px solid var(--border)' }}
+            >
+              {node.relationships.length}
+            </span>
+          </div>
+          <div className="space-y-2">
+            {node.relationships.map((rel, i) => {
+              const snippet = rel.sources?.find(source => source.snippet)?.snippet;
+              const sourceLabel = rel.sources?.[0]?.title || rel.sources?.[0]?.url;
+              const isOut = rel.direction === 'out';
+              return (
+                <div
+                  key={i}
+                  className="rounded-lg px-3 py-2 transition-colors hover:bg-accent cursor-pointer"
+                  style={{ background: 'var(--secondary)', border: '1px solid var(--border)' }}
+                  onClick={() => onNodeFocus?.(rel.otherLabel)}
+                  title="Focus this connection"
+                >
+                  <div className="flex items-baseline gap-1.5 text-xs leading-snug">
+                    {isOut ? (
+                      <>
+                        <span className="shrink-0 font-mono" style={{ color: 'var(--muted-foreground)', fontSize: 10 }}>→</span>
+                        <span style={{ color: 'var(--muted-foreground)' }}>{rel.predicate}</span>
+                        <span className="font-medium truncate" style={{ color: 'var(--foreground)' }}>{rel.otherLabel}</span>
+                      </>
+                    ) : (
+                      <>
+                        <span className="font-medium truncate" style={{ color: 'var(--foreground)' }}>{rel.otherLabel}</span>
+                        <span style={{ color: 'var(--muted-foreground)' }}>{rel.predicate}</span>
+                        <span className="shrink-0 font-mono" style={{ color: 'var(--muted-foreground)', fontSize: 10 }}>→</span>
+                      </>
+                    )}
+                  </div>
+                  {snippet && (
+                    <div
+                      className="mt-1.5 italic line-clamp-2 text-[11px]"
+                      style={{ color: 'var(--muted-foreground)' }}
+                    >
+                      "{snippet}"
+                    </div>
+                  )}
+                  {!snippet && sourceLabel && (
+                    <div
+                      className="mt-1.5 truncate text-[10px]"
+                      style={{ color: 'var(--muted-foreground)' }}
+                    >
+                      {sourceLabel}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export interface SelectedNodeRelationship {
+  direction: 'in' | 'out';
+  predicate: string;
+  otherLabel: string;
+  sources?: Array<{ title?: string; url?: string; snippet?: string }>;
+}
+
+export interface SelectedNodeInfo {
+  id: string;
+  label: string;
+  type?: string;
+  description?: string;
+  relationships: SelectedNodeRelationship[];
+}
+
 interface SidePanelProps {
   side: 'left' | 'right';
   isOpen: boolean;
@@ -273,11 +445,23 @@ interface SidePanelProps {
   onFocusMultiple?: (nodeIds: string[]) => void;
   categories?: NodeCategory[];
   reasoningSteps?: AIReasoningStep[];
+  selectedNode?: SelectedNodeInfo | null;
+  onSelectedNodeClose?: () => void;
 }
 
-export function SidePanel({ side, isOpen, onClose, nodes = [], edges = [], onNodeFocus, onFocusMultiple, categories = [], reasoningSteps = [] }: SidePanelProps) {
+type LeftTab = 'contents' | 'selected';
+
+export function SidePanel({ side, isOpen, onClose, nodes = [], edges = [], onNodeFocus, onFocusMultiple, categories = [], reasoningSteps = [], selectedNode = null, onSelectedNodeClose }: SidePanelProps) {
   const isLeft = side === 'left';
   const reasoningBottomRef = useRef<HTMLDivElement>(null);
+  const [activeTab, setActiveTab] = useState<LeftTab>('contents');
+
+  // Whenever a new node is selected, snap to the Selected tab. Switching
+  // back to Contents is a manual user action; we don't auto-switch on
+  // deselect because that would yank focus away mid-read.
+  useEffect(() => {
+    if (selectedNode) setActiveTab('selected');
+  }, [selectedNode?.id]);
 
   useEffect(() => {
     if (!isLeft && reasoningSteps.length > 0) {
@@ -344,7 +528,7 @@ export function SidePanel({ side, isOpen, onClose, nodes = [], edges = [], onNod
               className="text-sm font-semibold"
               style={{ fontFamily: 'var(--font-display)', color: 'var(--foreground)' }}
             >
-              {isLeft ? 'Table of Contents' : 'AI Reasoning'}
+              {isLeft ? (activeTab === 'selected' && selectedNode ? 'Node Details' : 'Table of Contents') : 'AI Reasoning'}
             </h3>
             <button
               onClick={onClose}
@@ -355,21 +539,46 @@ export function SidePanel({ side, isOpen, onClose, nodes = [], edges = [], onNod
             </button>
           </div>
 
+          {/* Tabs (left only, only when a node is selected) */}
+          {isLeft && selectedNode && (
+            <div
+              className="flex items-center gap-1 px-3 py-2 border-b"
+              style={{ borderColor: 'var(--border)' }}
+            >
+              <LeftTabButton
+                active={activeTab === 'contents'}
+                onClick={() => setActiveTab('contents')}
+                label="Contents"
+              />
+              <LeftTabButton
+                active={activeTab === 'selected'}
+                onClick={() => setActiveTab('selected')}
+                label="Node"
+                badge={selectedNode.relationships.length || undefined}
+                onDismiss={onSelectedNodeClose}
+              />
+            </div>
+          )}
+
           {/* Content */}
-          <div className="p-5 overflow-y-auto" style={{ height: 'calc(100% - 57px)' }}>
+          <div className="p-5 overflow-y-auto" style={{ height: `calc(100% - ${isLeft && selectedNode ? 102 : 57}px)` }}>
             {isLeft ? (
-              <>
-                <DocumentList nodes={nodes} onNodeFocus={onNodeFocus} />
-                {categories.length > 0 ? (
-                  <CategoryList categories={categories} nodes={nodes} onFocusMultiple={onFocusMultiple} onNodeFocus={onNodeFocus} />
-                ) : tocRoots.length === 0 ? (
-                  <p className="text-xs" style={{ color: 'var(--muted-foreground)' }}>
-                    Build a mind map to see its table of contents here.
-                  </p>
-                ) : (
-                  <TocTree roots={tocRoots} onNodeFocus={onNodeFocus} />
-                )}
-              </>
+              activeTab === 'selected' && selectedNode ? (
+                <SelectedNodeContent node={selectedNode} onNodeFocus={onNodeFocus} />
+              ) : (
+                <>
+                  <DocumentList nodes={nodes} onNodeFocus={onNodeFocus} />
+                  {categories.length > 0 ? (
+                    <CategoryList categories={categories} nodes={nodes} onFocusMultiple={onFocusMultiple} onNodeFocus={onNodeFocus} />
+                  ) : tocRoots.length === 0 ? (
+                    <p className="text-xs" style={{ color: 'var(--muted-foreground)' }}>
+                      Build a mind map to see its table of contents here.
+                    </p>
+                  ) : (
+                    <TocTree roots={tocRoots} onNodeFocus={onNodeFocus} />
+                  )}
+                </>
+              )
             ) : (
               reasoningSteps.length === 0 ? (
                 <p className="text-xs" style={{ color: 'var(--muted-foreground)' }}>

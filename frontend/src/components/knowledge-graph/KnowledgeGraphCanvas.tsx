@@ -622,7 +622,6 @@ function KnowledgeGraphCanvasInner() {
 
     const rels: NodeRelationship[] = edges
       .filter(e => e.source === node.id || e.target === node.id)
-      .slice(0, 4)
       .map(e => {
         const predicate = (typeof e.label === 'string' && e.label && e.label !== 'expands')
           ? formatPredicateLabel(e.label)

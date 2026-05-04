@@ -83,7 +83,6 @@ export function QueryBox({
       transition={{ duration: 0.35, ease: [0.16, 1, 0.3, 1] }}
       className="fixed inset-x-0 bottom-0 z-40 flex flex-col items-center gap-2 px-4 pb-4 pt-2"
       style={{
-        background: 'linear-gradient(to top, color-mix(in oklch, var(--kg-canvas) 96%, transparent), color-mix(in oklch, var(--kg-canvas) 72%, transparent), transparent)',
         pointerEvents: 'none',
       }}
     >

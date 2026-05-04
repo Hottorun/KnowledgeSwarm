@@ -48,14 +48,15 @@ Three mechanisms make it scale: (a) hierarchical predicates become real tree edg
 - [x] Subcategory triples carry `subcategoryRoute: true` so the orchestrator's per-entity contains lock allows them to override earlier `category → contains → entity` edges
 - [x] Frontend recognises subcategory nodes (`presentationRole: 'subcategory'`) — `isSubcategoryNode`, structural styling (slate-550 between category and bucket shades), reveal-mode treatment, and `isStructuralNode` includes them so edge scoring stays sensible
 
-### Phase 3 — Progressive disclosure
+### Phase 3 — Progressive disclosure  ✓ (2026-05-04)
 
-- [ ] Frontend: per-parent visible-child cap (default 12)
-- [ ] When a parent has > cap children, render the top-N by importance + an "expand" bucket (`+47 more`) for the rest
-- [ ] Click bucket → expand its children, collapse other open buckets in the same parent (only one expanded at a time per parent to keep the tree breathable)
-- [ ] Animate camera to focus on the expanded subtree
-- [ ] All graph data stays in the underlying graph — only rendering is gated
-- [ ] Existing `bucketCentralFanout` is the starting point; generalize from "only at root" to "at any parent"
+- [x] `MAX_PARENT_FANOUT = 12` cap on rendered children per parent at every depth
+- [x] `bucketOversizedFanouts(nodes, edges, expandedBucketIds)` — for each parent (any node that's a `contains` source) with > 12 children, keep the top 11 by importance × degree and fold the rest into a single `bucket:<parentId>:more` node. Descendants of bucketed children are also hidden (they re-appear once the bucket is expanded)
+- [x] `expandedBucketIds: Set<string>` state in SigmaGraphView — clicking an overflow bucket toggles its parent's expansion in place; other buckets stay collapsed independently
+- [x] `clickNode` handler distinguishes `:more` overflow buckets (toggle expand) from legacy semantic center buckets (show member list panel — old behavior preserved)
+- [x] Buckets emitted as real `parent → contains → bucket` edges with `presentation: true` so the BFS layout treats them as a normal child and slots them inside the parent's wedge
+- [x] Render effect dependency array includes `expandedBucketIds` so toggling triggers a re-layout / Sigma rebuild
+- [x] Underlying graph data unchanged — bucketing is purely a render-time transform; expanding a bucket re-injects the original children into the visible set
 
 ### Phase 4 — Document clusters (optional, later)
 

@@ -160,29 +160,80 @@ export function NodeInputBox({ nodeLabel, entityType, relationships = [], positi
             </div>
           </div>
 
-          {/* Relationships — what this node actually means in context */}
+          {/* Relationships — every connection of this node, scrollable.
+              Each row shows direction, predicate, other-end label, and the
+              first source snippet inline so the popup actually answers
+              "what is this node connected to and why" without an extra
+              click into evidence. */}
           {relationships.length > 0 && (
-            <div className="mt-2 space-y-1">
-              {relationships.map((rel, i) => (
-                <div key={i} className="flex items-baseline gap-1.5 text-xs leading-snug">
-                  <span className="shrink-0 font-mono" style={{ color: 'var(--muted-foreground)', fontSize: 10 }}>
-                    {rel.direction === 'out' ? '→' : '←'}
-                  </span>
-                  <span style={{ color: 'var(--muted-foreground)' }}>{rel.predicate}</span>
-                  <span className="font-medium truncate" style={{ color: 'var(--foreground)' }}>
-                    "{rel.otherLabel}"
-                  </span>
-                  {rel.sources && rel.sources.length > 0 && (
-                    <span
-                      className="ml-auto min-w-0 truncate text-[10px]"
-                      title={rel.sources.map(source => source.snippet || source.title || source.url).filter(Boolean).join('\n')}
-                      style={{ color: 'var(--muted-foreground)' }}
-                    >
-                      {rel.sources[0].title || rel.sources[0].url}
-                    </span>
-                  )}
-                </div>
-              ))}
+            <div className="mt-2">
+              <div
+                className="flex items-center justify-between mb-1 text-[10px] uppercase tracking-wider font-semibold"
+                style={{ color: 'var(--muted-foreground)' }}
+              >
+                <span>Connections</span>
+                <span
+                  className="px-1.5 py-0.5 rounded-full"
+                  style={{ background: 'var(--secondary)', border: '1px solid var(--border)' }}
+                >
+                  {relationships.length}
+                </span>
+              </div>
+              <div
+                className="space-y-1.5 overflow-y-auto pr-1"
+                style={{ maxHeight: 168 }}
+              >
+                {relationships.map((rel, i) => {
+                  const snippet = rel.sources?.find(source => source.snippet)?.snippet;
+                  const sourceLabel = rel.sources?.[0]?.title || rel.sources?.[0]?.url;
+                  // Read order matches the actual triple direction. For
+                  // outgoing edges (this → other), predicate first then
+                  // other-end label. For incoming (other → this), the
+                  // other-end label comes first so it reads naturally:
+                  // "Grace Kim manages …" instead of "← manages Grace Kim".
+                  const isOut = rel.direction === 'out';
+                  return (
+                    <div key={i} className="text-xs leading-snug">
+                      <div className="flex items-baseline gap-1.5">
+                        {isOut ? (
+                          <>
+                            <span className="shrink-0 font-mono" style={{ color: 'var(--muted-foreground)', fontSize: 10 }}>→</span>
+                            <span style={{ color: 'var(--muted-foreground)' }}>{rel.predicate}</span>
+                            <span className="font-medium truncate" style={{ color: 'var(--foreground)' }}>
+                              "{rel.otherLabel}"
+                            </span>
+                          </>
+                        ) : (
+                          <>
+                            <span className="font-medium truncate" style={{ color: 'var(--foreground)' }}>
+                              "{rel.otherLabel}"
+                            </span>
+                            <span style={{ color: 'var(--muted-foreground)' }}>{rel.predicate}</span>
+                            <span className="shrink-0 font-mono" style={{ color: 'var(--muted-foreground)', fontSize: 10 }}>→</span>
+                          </>
+                        )}
+                      </div>
+                      {snippet && (
+                        <div
+                          className="ml-4 mt-0.5 italic line-clamp-2 text-[10.5px]"
+                          style={{ color: 'var(--muted-foreground)' }}
+                          title={snippet}
+                        >
+                          "{snippet}"
+                        </div>
+                      )}
+                      {!snippet && sourceLabel && (
+                        <div
+                          className="ml-4 mt-0.5 truncate text-[10px]"
+                          style={{ color: 'var(--muted-foreground)' }}
+                        >
+                          {sourceLabel}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
         </div>

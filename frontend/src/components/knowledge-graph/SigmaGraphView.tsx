@@ -41,6 +41,8 @@ type SigmaNodeAttributes = {
 type SigmaEdgeAttributes = {
   size: number;
   color: string;
+  label?: string;
+  forceLabel?: boolean;
 };
 
 type NodeTween = {
@@ -134,6 +136,29 @@ function isScaffoldStructuralNode(node: GraphNode | undefined): boolean {
   return isExplicitCategoryNode(node) || isSubcategoryNode(node);
 }
 
+// Subtle category accents — desaturated, low-chroma hues that stay in the
+// same lightness band as slate-600 so the eye reads them as variations of
+// the structural color, not a separate palette. Helps users build a spatial
+// anchor ("Finance is the cool blue wedge") without re-introducing the
+// loud saturated palette.
+const CATEGORY_ACCENT: Record<string, string> = {
+  finance: '#4f6f7c',         // teal-slate
+  'hr-people': '#5e6c83',     // periwinkle
+  legal: '#6b6079',           // muted plum
+  operations: '#56766b',      // sage
+  risk: '#7a5d61',            // dusty rose
+  technology: '#5a5c80',      // muted indigo
+  'strategy-market': '#7a6e54', // warm taupe
+  other: '#475569',           // slate fallback
+};
+
+function categoryAccent(node: GraphNode | undefined): string | null {
+  if (!node) return null;
+  const data = node.data as GraphNodeData;
+  const key = String(data.category ?? data.semanticCategory ?? '').toLowerCase();
+  return CATEGORY_ACCENT[key] ?? null;
+}
+
 // Monochrome palette: a slate scale stepped by structural role so the
 // hierarchy is communicated by lightness alone (no saturated hues).
 // Active center is the darkest + largest, ordinary detail nodes the lightest.
@@ -142,9 +167,11 @@ function nodeColor(node: GraphNode, activeNodeId?: string | null, highlightedNod
   if (node.id === activeNodeId) return '#0f172a';                          // slate-900 (near-black)
   if (highlightedNodes?.has(node.id) || data.isHighlighted) return '#334155'; // slate-700
   if (data.presentationRole === 'main_entity' || data.nodeType === 'root') return '#1e293b'; // slate-800
-  if (isExplicitCategoryNode(node)) return '#475569';                    // slate-600
-  if (isSubcategoryNode(node)) return '#52606d';                         // slate-550 (between cat & bucket)
-  if (data.isSigmaBucket) return '#64748b';                               // slate-500
+  if (isExplicitCategoryNode(node)) return categoryAccent(node) ?? '#475569';
+  if (isSubcategoryNode(node)) return categoryAccent(node) ?? '#52606d';
+  // Buckets render in a desaturated indigo so "+N more" reads as clickable
+  // and visually distinct from a regular dot.
+  if (data.isSigmaBucket) return '#94a3b8';                               // slate-400, lighter
   if (nodeKind(node).toLowerCase().includes('document')) return '#64748b'; // slate-500
   return '#94a3b8';                                                       // slate-400 (default)
 }
@@ -177,9 +204,13 @@ function pickCenter(
   _viewMode: 'focused' | 'overview' = 'focused',
 ): string | null {
   void _viewMode;
-  if (activeNodeId && nodes.some(node => node.id === activeNodeId)) return activeNodeId;
+  // Always pin the BFS centre to the main entity. Clicking a node updates
+  // `activeNodeId` for highlighting + reveal-mode (showing that node's
+  // cross-links), but it must NOT recentre the layout — the graph stays
+  // anchored so the user has a stable spatial map.
   const main = nodes.find(isMainEntityNode);
   if (main) return main.id;
+  if (activeNodeId && nodes.some(node => node.id === activeNodeId)) return activeNodeId;
   const root = nodes.find(node => (node.data as GraphNodeData).nodeType === 'root');
   if (root) return root.id;
 
@@ -416,9 +447,11 @@ function computeBranchLayout(
       ? Math.PI * 2
       : parentSector * SECTOR_SIBLING_MARGIN;
 
-    const weights = isRootFanout
-      ? ordered.map(() => 1)
-      : ordered.map(child => Math.max(1, Math.sqrt(subtreeSize(child.id))));
+    // Sub-linear (sqrt) weighting at every depth so a category with 30
+    // children doesn't eat the whole circle, but sparse categories with
+    // 1–2 children don't get an oversized empty wedge either. Small
+    // categories shrink, big categories grow — both bounded.
+    const weights = ordered.map(child => Math.max(1, Math.sqrt(subtreeSize(child.id))));
     const totalWeight = weights.reduce((sum, w) => sum + w, 0) || 1;
 
     // Where the angular cursor starts. Root: first interleaved child's
@@ -469,7 +502,8 @@ function nodeAttributes(
     data.isHighlighted === true ||
     data.presentationRole === 'main_entity' ||
     data.nodeType === 'root' ||
-    isExplicitCategoryNode(node);
+    isExplicitCategoryNode(node) ||
+    data.isSigmaBucket === true;
   // Force labels for the structural backbone (root, active, key, depth ≤ 1).
   // For deeper / non-key nodes, let Sigma's labelDensity collision avoidance
   // decide — that hides labels that would overlap each other rather than
@@ -536,6 +570,10 @@ function edgeAttributes(edge: GraphEdge, activeNodeId?: string | null, viewMode:
   return {
     size: activeEdge ? Math.max(1.9, roleSize * overviewScale * 1.5) : roleSize * overviewScale,
     color,
+    // Empty label by default; the `enterEdge` handler fills + forces the
+    // label on hover and `leaveEdge` clears it.
+    label: '',
+    forceLabel: false,
   };
 }
 
@@ -780,6 +818,204 @@ function isDocumentNode(node: GraphNode): boolean {
 // `edges.filter(...has(source) && has(target))` step downstream.
 function stripDocumentNodes(nodes: GraphNode[]): GraphNode[] {
   return nodes.filter(node => !isDocumentNode(node));
+}
+
+// Maximum direct children rendered per parent at depth ≥ 1 before overflow
+// gets folded into a single bucket node. Smaller values keep the canvas
+// breathable as the data grows; the bucket is clickable to expand in place.
+const MAX_PARENT_FANOUT = 8;
+
+// Generalised progressive disclosure: every parent (any node that's the
+// source of one or more `contains` edges) gets capped at MAX_PARENT_FANOUT
+// rendered children. Excess children are folded into a single
+// `bucket:<parentId>:more` node so the tree stays browsable even when a
+// category or subcategory has 50+ entities. Buckets in `expandedBucketIds`
+// stay expanded — their children render normally for that render pass.
+function bucketOversizedFanouts(
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  expandedBucketIds: Set<string>,
+): { nodes: GraphNode[]; edges: GraphEdge[] } {
+  const childrenByParent = new Map<string, string[]>();
+  for (const edge of edges) {
+    const label = String(edge.label ?? '').toLowerCase();
+    if (label !== 'contains') continue;
+    const list = childrenByParent.get(edge.source) ?? [];
+    list.push(edge.target);
+    childrenByParent.set(edge.source, list);
+  }
+
+  const oversizedParents: Array<{ parentId: string; children: string[] }> = [];
+  for (const [parentId, children] of childrenByParent) {
+    if (children.length > MAX_PARENT_FANOUT) {
+      oversizedParents.push({ parentId, children });
+    }
+  }
+  if (oversizedParents.length === 0) return { nodes, edges };
+
+  const nodeById = new Map(nodes.map(node => [node.id, node]));
+  const edgeDegree = graphDegree(edges);
+
+  const newBucketNodes: GraphNode[] = [];
+  // childrenIds we want to hide → bucketed; map child → bucket
+  const childToBucket = new Map<string, string>();
+  // bucketId → parentId (for the synthetic edge)
+  const bucketToParent = new Map<string, string>();
+
+  for (const { parentId, children } of oversizedParents) {
+    const bucketId = `${SIGMA_BUCKET_PREFIX}${parentId}:more`;
+    if (expandedBucketIds.has(bucketId)) continue;
+
+    // Rank children: importance + degree → keep top N visible, bucket the rest.
+    const ranked = [...children].sort((a, b) => {
+      const nodeA = nodeById.get(a);
+      const nodeB = nodeById.get(b);
+      const scoreA = (nodeA ? nodeImportance(nodeA) * 24 : 0) + (edgeDegree.get(a) ?? 0);
+      const scoreB = (nodeB ? nodeImportance(nodeB) * 24 : 0) + (edgeDegree.get(b) ?? 0);
+      return scoreB - scoreA;
+    });
+
+    const visibleCount = Math.max(1, MAX_PARENT_FANOUT - 1); // reserve one slot for the bucket
+    const overflow = ranked.slice(visibleCount);
+    if (overflow.length === 0) continue;
+
+    const parentNode = nodeById.get(parentId);
+    const parentLabel = parentNode ? String((parentNode.data as GraphNodeData).label ?? parentId) : parentId;
+    const bucket: GraphNode<GraphNodeData> = {
+      id: bucketId,
+      type: 'graphNode',
+      position: { x: 0, y: 0 },
+      data: {
+        label: `+${overflow.length} more`,
+        description: 'Grouped Area',
+        nodeType: 'subtopic',
+        isSigmaBucket: true,
+        memberIds: overflow,
+        hiddenCount: overflow.length,
+        overview: `${overflow.length} more child${overflow.length === 1 ? '' : 'ren'} under ${parentLabel}. Click to expand.`,
+        parentId,
+      },
+    };
+    newBucketNodes.push(bucket);
+    bucketToParent.set(bucketId, parentId);
+    for (const childId of overflow) childToBucket.set(childId, bucketId);
+  }
+
+  if (newBucketNodes.length === 0) return { nodes, edges };
+
+  const bucketedChildIds = new Set(childToBucket.keys());
+  // Drop bucketed children + their descendant subtree (transitively, via
+  // contains edges originating from them). Otherwise the descendants render
+  // floating with no parent. We keep them in the underlying graph; only
+  // rendering is gated.
+  const adjOutContains = new Map<string, string[]>();
+  for (const edge of edges) {
+    if (String(edge.label ?? '').toLowerCase() !== 'contains') continue;
+    const list = adjOutContains.get(edge.source) ?? [];
+    list.push(edge.target);
+    adjOutContains.set(edge.source, list);
+  }
+  const hiddenIds = new Set<string>(bucketedChildIds);
+  const stack = [...bucketedChildIds];
+  while (stack.length > 0) {
+    const id = stack.pop()!;
+    for (const child of adjOutContains.get(id) ?? []) {
+      if (!hiddenIds.has(child)) {
+        hiddenIds.add(child);
+        stack.push(child);
+      }
+    }
+  }
+
+  const visibleNodes = nodes.filter(node => !hiddenIds.has(node.id));
+  const visibleEdges = edges.filter(edge => !hiddenIds.has(edge.source) && !hiddenIds.has(edge.target));
+
+  // Add the bucket nodes + a `parent → bucket` contains edge so the bucket
+  // sits in its parent's wedge and BFS treats it as a normal child.
+  const bucketEdges: GraphEdge[] = newBucketNodes.map(bucket => ({
+    id: `${(bucket.data as GraphNodeData).parentId}->${bucket.id}`,
+    source: String((bucket.data as GraphNodeData).parentId ?? ''),
+    target: bucket.id,
+    label: 'contains',
+    data: {
+      confidence: 1,
+      sigmaBucket: true,
+      properties: { presentation: true, bucketEdge: true },
+    },
+  }));
+
+  return {
+    nodes: [...visibleNodes, ...newBucketNodes],
+    edges: [...visibleEdges, ...bucketEdges],
+  };
+}
+
+// When set, callers should treat any node/edge OUTSIDE the set as "dimmed"
+// — render at reduced opacity. `null` means no focal context (full graph
+// stays at full opacity).
+function computeFocalSet(
+  activeNodeId: string | null | undefined,
+  isStructuralActive: boolean,
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+): Set<string> | null {
+  if (!activeNodeId || isStructuralActive) return null;
+  if (!nodes.some(node => node.id === activeNodeId)) return null;
+
+  const set = new Set<string>([activeNodeId]);
+  for (const edge of edges) {
+    if (edge.source === activeNodeId) set.add(edge.target);
+    else if (edge.target === activeNodeId) set.add(edge.source);
+  }
+  // Walk up the scaffold (`contains` / `has_business_area`) so the path
+  // back to the main entity stays bright — the user always sees "where
+  // this lives in the tree" even when the rest of the graph dims.
+  const incomingScaffold = new Map<string, string>();
+  for (const edge of edges) {
+    const label = String(edge.label ?? '').toLowerCase();
+    if (label !== 'contains' && label !== 'has_business_area') continue;
+    incomingScaffold.set(edge.target, edge.source);
+  }
+  let walker: string | undefined = incomingScaffold.get(activeNodeId);
+  const guard = new Set<string>();
+  while (walker && !guard.has(walker)) {
+    guard.add(walker);
+    set.add(walker);
+    walker = incomingScaffold.get(walker);
+  }
+  return set;
+}
+
+function applyFocalDim(color: string, focalSet: Set<string> | null, nodeId: string): string {
+  if (!focalSet || focalSet.has(nodeId)) return color;
+  return colorWithAlpha(color, 0.22);
+}
+
+function applyFocalDimEdge(color: string, focalSet: Set<string> | null, source: string, target: string): string {
+  if (!focalSet) return color;
+  if (focalSet.has(source) && focalSet.has(target)) return color;
+  return colorWithAlpha(color, 0.18);
+}
+
+function colorWithAlpha(color: string, alpha: number): string {
+  // Already rgba? Replace the alpha component.
+  const rgba = color.match(/^rgba\((\d+),\s*(\d+),\s*(\d+),\s*[0-9.]+\)$/);
+  if (rgba) return `rgba(${rgba[1]}, ${rgba[2]}, ${rgba[3]}, ${alpha})`;
+  // Hex (#rrggbb or #rgb): convert to rgba.
+  const hex = color.replace('#', '');
+  if (hex.length === 6) {
+    const r = parseInt(hex.slice(0, 2), 16);
+    const g = parseInt(hex.slice(2, 4), 16);
+    const b = parseInt(hex.slice(4, 6), 16);
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  }
+  if (hex.length === 3) {
+    const r = parseInt(hex[0] + hex[0], 16);
+    const g = parseInt(hex[1] + hex[1], 16);
+    const b = parseInt(hex[2] + hex[2], 16);
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  }
+  return color;
 }
 
 function bucketCentralFanout(
@@ -1069,6 +1305,10 @@ export function SigmaGraphView({
   const [showAllEvidenceSources, setShowAllEvidenceSources] = useState(false);
   const [copiedEvidence, setCopiedEvidence] = useState(false);
   const [detailMode, setDetailMode] = useState<DetailMode>('balanced');
+  // Per-parent overflow buckets the user has expanded — when present, that
+  // parent's children render normally instead of being folded into a single
+  // "+N more" bucket. Click on the bucket toggles the entry.
+  const [expandedBucketIds, setExpandedBucketIds] = useState<Set<string>>(() => new Set());
 
   useEffect(() => {
     onNodeClickRef.current = onNodeClick;
@@ -1093,7 +1333,14 @@ export function SigmaGraphView({
         labelColor: { color: '#111827' },
         labelDensity: 0.12,
         labelRenderedSizeThreshold: 8,
-        renderEdgeLabels: false,
+        // Edge labels are off globally — too noisy at scale. We flip
+        // `forceLabel: true` on the hovered edge inside `enterEdge` so the
+        // predicate appears next to the line without permanently cluttering
+        // the canvas.
+        renderEdgeLabels: true,
+        labelFont: 'inherit',
+        edgeLabelSize: 10,
+        edgeLabelColor: { color: '#475569' },
         zIndex: true,
       });
       rendererRef.current.on('clickNode', ({ node }) => {
@@ -1101,6 +1348,20 @@ export function SigmaGraphView({
         setSelectedEvidence(null);
         setShowAllEvidenceSources(false);
         setCopiedEvidence(false);
+        // Progressive-disclosure overflow buckets end in `:more`. Click to
+        // toggle the parent's overflow open/closed in place. Other buckets
+        // (semantic center buckets) keep the legacy behaviour of showing a
+        // member list panel.
+        if (virtualBucketIdsRef.current.has(node) && node.endsWith(':more')) {
+          setExpandedBucketIds(prev => {
+            const next = new Set(prev);
+            if (next.has(node)) next.delete(node);
+            else next.add(node);
+            return next;
+          });
+          setSelectedBucket(null);
+          return;
+        }
         if (virtualBucketIdsRef.current.has(node)) {
           const memberIds = bucketMemberIdsRef.current.get(node) ?? [];
           if (memberIds.length > 0) {
@@ -1133,7 +1394,9 @@ export function SigmaGraphView({
         const graphEdge = edgeByIdRef.current.get(edge);
         if (graphEdge) setSelectedEvidence(buildEdgeEvidence(graphEdge, nodeLabelByIdRef.current, documentNodeBySourceKeyRef.current));
       });
-      rendererRef.current.on('enterNode', () => {
+      rendererRef.current.on('enterNode', ({ node }) => {
+        // Halos are decorative; don't change the cursor when hovering them.
+        if (isSigmaHaloNodeId(node)) return;
         rendererRef.current!.getContainer().style.cursor = 'pointer';
       });
       rendererRef.current.on('leaveNode', () => {
@@ -1143,9 +1406,13 @@ export function SigmaGraphView({
         rendererRef.current!.getContainer().style.cursor = 'pointer';
         const graph = graphRef.current;
         if (graph?.hasEdge(edge)) {
+          const graphEdge = edgeByIdRef.current.get(edge);
+          const predicate = graphEdge ? formatPredicate(graphEdge.label) : '';
           graph.mergeEdgeAttributes(edge, {
             size: viewModeRef.current === 'overview' ? 2.5 : 3,
             color: '#111827',
+            label: predicate,
+            forceLabel: true,
           });
           rendererRef.current?.refresh();
         }
@@ -1189,13 +1456,35 @@ export function SigmaGraphView({
     const revealedNodeId = isStructuralActive ? null : (activeNodeId ?? null);
     const lodEdges = filterToScaffoldEdges(categoryRouted, revealedNodeId);
     const centerId = centerCandidate;
-    const bucketed = bucketCentralFanout(lodNodes, lodEdges, centerId);
-    const visibleNodes = bucketed.nodes;
-    const visibleEdges = bucketed.edges;
+    const centerBucketed = bucketCentralFanout(lodNodes, lodEdges, centerId);
+    // Progressive disclosure: cap fanout at every depth, not just the root.
+    // Buckets the user has expanded stay flat for this render pass.
+    const fanoutBucketed = bucketOversizedFanouts(
+      centerBucketed.nodes,
+      centerBucketed.edges,
+      expandedBucketIds,
+    );
+    const visibleNodes = fanoutBucketed.nodes;
+    const visibleEdges = fanoutBucketed.edges;
+
+    // Focal-context dim: when the user has selected an entity, fade
+    // everything that isn't the active node, its 1-hop neighbours via any
+    // edge, or its scaffold ancestors back to the centre. Keeps the layout
+    // perfectly stable while making "what is this connected to and where
+    // does it live" pop visually. When no selection (or the active node is
+    // structural / the centre), the whole graph stays at full strength.
+    const focalSet = computeFocalSet(activeNodeId, isStructuralActive, visibleNodes, visibleEdges);
     rendererRef.current.setSettings(sigmaLabelSettings(visibleNodes.length, viewMode));
     const haloId = centerId ? `${SIGMA_HALO_PREFIX}${centerId}` : null;
+    // A second, smaller halo follows the user-selected node when it isn't
+    // the centre — gives the focal entity a clear ring/glow so it pops above
+    // its category siblings.
+    const activeHaloId = activeNodeId && activeNodeId !== centerId
+      ? `${SIGMA_HALO_PREFIX}active:${activeNodeId}`
+      : null;
     const nodeIds = new Set(visibleNodes.map(node => node.id));
     if (haloId) nodeIds.add(haloId);
+    if (activeHaloId) nodeIds.add(activeHaloId);
     const renderableEdges = selectRenderableEdges(visibleNodes, visibleEdges, activeNodeId, viewMode);
     const edgeIds = new Set(renderableEdges.map(edgeKey));
     const positions = computeBranchLayout(visibleNodes, renderableEdges, activeNodeId, viewMode);
@@ -1255,10 +1544,36 @@ export function SigmaGraphView({
         graph.addNode(haloId, attrs);
       }
     };
+    const addOrUpdateActiveHalo = () => {
+      if (!activeHaloId || !activeNodeId) return;
+      const activePosition = positions.get(activeNodeId);
+      if (!activePosition) return;
+      // Halo radius = node size + a fixed gap so the ring reads as a clear
+      // outline regardless of the node's depth.
+      const activeNode = visibleNodes.find(node => node.id === activeNodeId);
+      const baseSize = activeNode ? nodeSize(activeNode, activeNodeId, viewMode) : 8;
+      const attrs: SigmaNodeAttributes = {
+        x: activePosition.x,
+        y: activePosition.y,
+        label: '',
+        size: baseSize + (viewMode === 'overview' ? 4 : 6),
+        color: 'rgba(15, 23, 42, 0.18)',
+        forceLabel: false,
+        zIndex: 0,
+      };
+      if (graph.hasNode(activeHaloId)) {
+        graph.replaceNodeAttributes(activeHaloId, attrs);
+      } else {
+        graph.addNode(activeHaloId, attrs);
+      }
+    };
 
     const addOrUpdateNode = (node: GraphNode) => {
       const position = positions.get(node.id) ?? { id: node.id, x: 0, y: 0, depth: 0, angle: 0 };
-      const attrs = nodeAttributes(node, position, activeNodeId, highlightedNodes, viewMode, visibleNodes.length);
+      const baseAttrs = nodeAttributes(node, position, activeNodeId, highlightedNodes, viewMode, visibleNodes.length);
+      const attrs: SigmaNodeAttributes = focalSet
+        ? { ...baseAttrs, color: applyFocalDim(baseAttrs.color, focalSet, node.id) }
+        : baseAttrs;
       const firstSeenAt = firstSeenAtRef.current.get(node.id);
       const isSticky = firstSeenAt !== undefined && performance.now() - firstSeenAt > STICKY_NODE_AFTER_MS && centerId === previousCenterIdRef.current;
       if (!graph.hasNode(node.id)) {
@@ -1286,7 +1601,10 @@ export function SigmaGraphView({
       const id = edgeKey(edge, index);
       if (!nodeIds.has(edge.source) || !nodeIds.has(edge.target) || edge.source === edge.target) return;
       if (!graph.hasNode(edge.source) || !graph.hasNode(edge.target)) return;
-      const attrs = edgeAttributes(edge, activeNodeId, viewMode);
+      const baseEdgeAttrs = edgeAttributes(edge, activeNodeId, viewMode);
+      const attrs: SigmaEdgeAttributes = focalSet
+        ? { ...baseEdgeAttrs, color: applyFocalDimEdge(baseEdgeAttrs.color, focalSet, edge.source, edge.target) }
+        : baseEdgeAttrs;
       if (!graph.hasEdge(id)) {
         graph.addEdgeWithKey(id, edge.source, edge.target, attrs);
       } else {
@@ -1295,6 +1613,7 @@ export function SigmaGraphView({
     };
 
     addOrUpdateHalo();
+    addOrUpdateActiveHalo();
 
     visibleNodes.forEach(node => {
       const isNew = !seenNodeIdsRef.current.has(node.id);
@@ -1374,7 +1693,7 @@ export function SigmaGraphView({
         rendererRef.current?.getCamera().animatedReset({ duration: 380 });
       }, 1200);
     }
-  }, [nodes, edges, activeNodeId, highlightedNodes, viewMode, detailMode]);
+  }, [nodes, edges, activeNodeId, highlightedNodes, viewMode, detailMode, expandedBucketIds]);
 
   useEffect(() => {
     return () => {
