@@ -139,20 +139,17 @@ function isScaffoldStructuralNode(node: GraphNode | undefined): boolean {
   return isExplicitCategoryNode(node) || isSubcategoryNode(node);
 }
 
-// Subtle category accents — desaturated, low-chroma hues that stay in the
-// same lightness band as slate-600 so the eye reads them as variations of
-// the structural color, not a separate palette. Helps users build a spatial
-// anchor ("Finance is the cool blue wedge") without re-introducing the
-// loud saturated palette.
+// Vibrant category accent colors — each category gets a distinct saturated hue
+// so spatial regions of the graph are immediately identifiable.
 const CATEGORY_ACCENT: Record<string, string> = {
-  finance: '#4f6f7c',         // teal-slate
-  'hr-people': '#5e6c83',     // periwinkle
-  legal: '#6b6079',           // muted plum
-  operations: '#56766b',      // sage
-  risk: '#7a5d61',            // dusty rose
-  technology: '#5a5c80',      // muted indigo
-  'strategy-market': '#7a6e54', // warm taupe
-  other: '#475569',           // slate fallback
+  finance:           '#f59e0b', // amber-400
+  'hr-people':       '#10b981', // emerald-500
+  legal:             '#8b5cf6', // violet-500
+  operations:        '#06b6d4', // cyan-500
+  risk:              '#ef4444', // red-500
+  technology:        '#3b82f6', // blue-500
+  'strategy-market': '#f97316', // orange-500
+  other:             '#6366f1', // indigo-500
 };
 
 function categoryAccent(node: GraphNode | undefined): string | null {
@@ -162,21 +159,49 @@ function categoryAccent(node: GraphNode | undefined): string | null {
   return CATEGORY_ACCENT[key] ?? null;
 }
 
-// Monochrome palette: a slate scale stepped by structural role so the
-// hierarchy is communicated by lightness alone (no saturated hues).
-// Active center is the darkest + largest, ordinary detail nodes the lightest.
+// Vibrant palette: each node role and entity type gets a distinct hue so
+// the graph reads as a colourful knowledge map, not a monochrome dot cloud.
 function nodeColor(node: GraphNode, activeNodeId?: string | null, highlightedNodes?: Set<string>): string {
   const data = node.data as GraphNodeData;
-  if (node.id === activeNodeId) return '#0f172a';                          // slate-900 (near-black)
-  if (highlightedNodes?.has(node.id) || data.isHighlighted) return '#334155'; // slate-700
-  if (data.presentationRole === 'main_entity' || data.nodeType === 'root') return '#1e293b'; // slate-800
-  if (isExplicitCategoryNode(node)) return categoryAccent(node) ?? '#475569';
-  if (isSubcategoryNode(node)) return categoryAccent(node) ?? '#52606d';
-  // Buckets render in a desaturated indigo so "+N more" reads as clickable
-  // and visually distinct from a regular dot.
-  if (data.isSigmaBucket) return '#94a3b8';                               // slate-400, lighter
-  if (nodeKind(node).toLowerCase().includes('document')) return '#64748b'; // slate-500
-  return '#94a3b8';                                                       // slate-400 (default)
+  // Main entity / root node → deep indigo (the visual anchor)
+  if (data.presentationRole === 'main_entity' || data.nodeType === 'root') return '#4f46e5';
+  // Active (selected) node → brighter indigo ring
+  if (node.id === activeNodeId) return '#6366f1';
+  // Highlighted (child subtree) → slightly lighter
+  if (highlightedNodes?.has(node.id) || data.isHighlighted) return '#818cf8';
+  // Explicit category nodes → vibrant category accent
+  if (isExplicitCategoryNode(node)) return categoryAccent(node) ?? '#6366f1';
+  // Subcategory → softer shade of same category hue
+  if (isSubcategoryNode(node)) return categoryAccent(node) ?? '#a5b4fc';
+  // Bucket (+N more) → purple so it reads as "there's more here"
+  if (data.isSigmaBucket) return '#a855f7';
+  // Entity-type coloring
+  const kind = nodeKind(node).toLowerCase();
+  if (kind.includes('company'))      return '#3b82f6'; // blue-500
+  if (kind.includes('organization')) return '#8b5cf6'; // violet-500
+  if (kind.includes('person'))       return '#10b981'; // emerald-500
+  if (kind.includes('market'))       return '#f59e0b'; // amber-500
+  if (kind.includes('technology'))   return '#6366f1'; // indigo-500
+  if (kind.includes('product'))      return '#f97316'; // orange-500
+  if (kind.includes('event'))        return '#ef4444'; // red-500
+  if (kind.includes('location'))     return '#14b8a6'; // teal-500
+  if (kind.includes('regulation'))   return '#f43f5e'; // rose-500
+  if (kind.includes('document'))     return '#0ea5e9'; // sky-500
+  return '#64748b';                                     // slate-500 fallback
+}
+
+// Camera ratio below this value means the user has zoomed in far enough to
+// read node labels → expand circles to rectangular cards.
+const EXPAND_ZOOM_THRESHOLD = 0.42;
+
+function isAlwaysExpandedNode(node: GraphNode, childCount: number): boolean {
+  const data = node.data as GraphNodeData;
+  return (
+    data.presentationRole === 'main_entity' ||
+    data.nodeType === 'root' ||
+    isExplicitCategoryNode(node) ||
+    childCount >= 4
+  );
 }
 
 function nodeSize(node: GraphNode, activeNodeId?: string | null, viewMode: 'focused' | 'overview' = 'focused'): number {
@@ -366,6 +391,11 @@ function computeBranchLayout(
     if (!depths.has(node.id)) depths.set(node.id, maxConnectedDepth + 1);
   }
 
+  // Count how many nodes land at each depth — used to size each ring so the
+  // arc between adjacent nodes never becomes too cramped.
+  const nodesAtDepth = new Map<number, number>();
+  for (const d of depths.values()) nodesAtDepth.set(d, (nodesAtDepth.get(d) ?? 0) + 1);
+
   const parentByNode = new Map<string, string>();
   for (const node of nodes) {
     if (node.id === centerId) continue;
@@ -411,8 +441,22 @@ function computeBranchLayout(
   sectorWidthOf.set(centerId, Math.PI * 2);
 
   const SECTOR_SIBLING_MARGIN = 0.86; // children get 86% of parent's sector
-  const RING_GAP_BASE = 22;            // distance to depth-1 ring
-  const RING_GAP_GROWTH = 16;          // additional ring spacing per deeper level
+  // Minimum arc-length gap between adjacent node centers at the same ring.
+  const MIN_ARC_GAP = 24;
+  // Floor radius per depth level — each ring is at least this far from the
+  // previous one so even sparse depths have visible separation.
+  const RING_FLOOR_PER_DEPTH = 90;
+  // Subtrees with more descendants push their root radially outward; leaves
+  // sit at the base ring. This breaks the "all on one circle" pattern.
+  const RADIAL_STAGGER = 16;
+
+  // Returns the base ring radius for a given depth + population count.
+  // Adaptive: if the node count demands more arc, the ring grows to fit.
+  const baseRingRadius = (depth: number): number => {
+    const count = nodesAtDepth.get(depth) ?? 1;
+    const fromCount = (count * MIN_ARC_GAP) / (2 * Math.PI);
+    return Math.max(RING_FLOOR_PER_DEPTH * depth, fromCount);
+  };
 
   const layoutQueue = [centerId];
   while (layoutQueue.length > 0) {
@@ -466,17 +510,23 @@ function computeBranchLayout(
       : parentPosition.angle - availableSpread / 2;
     let cursor = cursorStart;
 
-    // Distance from origin: concentric rings keep all depth-d nodes at the
-    // same radius, which produces a clean recognisable mindmap shape.
-    const ringRadius = RING_GAP_BASE + (childDepth - 1) * RING_GAP_GROWTH;
+    // Base ring distance — adaptive to the number of siblings at this depth.
+    const baseR = baseRingRadius(childDepth);
 
     ordered.forEach((child, index) => {
       const sectorWidth = (weights[index] / totalWeight) * availableSpread;
       const angle = cursor + sectorWidth / 2;
       cursor += sectorWidth;
 
-      const x = Math.cos(angle) * ringRadius;
-      const y = Math.sin(angle) * ringRadius;
+      // Radial stagger: nodes with larger subtrees sit further from the
+      // center than leaf nodes at the same depth, breaking the flat-ring
+      // look. log2 keeps the spread sub-linear so huge subtrees don't
+      // push completely outside the visible area.
+      const stagger = Math.log2(subtreeSize(child.id) + 1) * RADIAL_STAGGER;
+      const r = baseR + stagger;
+
+      const x = Math.cos(angle) * r;
+      const y = Math.sin(angle) * r;
       positions.set(child.id, { id: child.id, x, y, depth: childDepth, angle });
       sectorWidthOf.set(child.id, sectorWidth);
       layoutQueue.push(child.id);
@@ -533,7 +583,7 @@ function nodeAttributes(
     // Active centre gets a larger, bolder, darker label so it reads as the
     // focal point even when surrounded by depth-1 siblings.
     labelSize: isActive ? 18 : isStructural ? 13 : 11,
-    labelColor: { color: isActive ? '#0f172a' : '#475569' },
+    labelColor: { color: isActive ? '#ffffff' : '#1e293b' },
     labelWeight: isActive ? 'bold' : 'normal',
   };
 }
@@ -566,10 +616,9 @@ function edgeAttributes(edge: GraphEdge, activeNodeId?: string | null, viewMode:
     role === 'bucket' ? 0.6 :
     0.55;
   const opacity = activeEdge ? Math.max(0.9, roleOpacity) : roleOpacity;
-  // Darker base (slate-700 #334155) keeps the line visible without screaming.
   const color = activeEdge
-    ? `rgba(15, 23, 42, ${opacity})`   // slate-900 for active
-    : `rgba(51, 65, 85, ${opacity})`;  // slate-700 for the rest
+    ? `rgba(79, 70, 229, ${opacity})`   // indigo-600 for active (matches root color)
+    : `rgba(100, 116, 139, ${opacity})`; // slate-500 for the rest
   return {
     size: activeEdge ? Math.max(1.9, roleSize * overviewScale * 1.5) : roleSize * overviewScale,
     color,
@@ -1026,6 +1075,86 @@ function colorWithAlpha(color: string, alpha: number): string {
   return color;
 }
 
+// Determine text color that contrasts well against a given hex bg color.
+function contrastText(hex: string): string {
+  const h = hex.replace('#', '');
+  const r = parseInt(h.slice(0, 2), 16) / 255;
+  const g = parseInt(h.slice(2, 4), 16) / 255;
+  const b = parseInt(h.slice(4, 6), 16) / 255;
+  const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  return luminance > 0.45 ? '#1e293b' : '#ffffff';
+}
+
+function createNodeCard(
+  node: GraphNode,
+  onClickNode: (id: string) => void,
+): HTMLDivElement {
+  const data = node.data as GraphNodeData;
+  const bg = nodeColor(node);
+  const text = contrastText(bg);
+  const label = String(data.label ?? node.id);
+  const typeLabel = String(data.description ?? data.nodeType ?? '');
+
+  const card = document.createElement('div');
+  card.style.cssText = [
+    'position: absolute',
+    'display: none',
+    'flex-direction: column',
+    'gap: 2px',
+    'padding: 7px 12px',
+    'border-radius: 10px',
+    'min-width: 72px',
+    'max-width: 180px',
+    `background: ${bg}`,
+    `color: ${text}`,
+    `border: 1.5px solid ${colorWithAlpha(bg, 0.55)}`,
+    'box-shadow: 0 3px 12px rgba(0,0,0,0.22), 0 1px 3px rgba(0,0,0,0.10)',
+    'pointer-events: auto',
+    'user-select: none',
+    'cursor: pointer',
+    'font-family: inherit',
+    'font-size: 12px',
+    'font-weight: 600',
+    'line-height: 1.3',
+    'overflow: hidden',
+    'transition: box-shadow 0.15s ease',
+    'will-change: transform',
+  ].join('; ');
+  // Store current zoom-adjusted scale so hover handlers can read it.
+  card.dataset.scale = '1';
+
+  const labelEl = document.createElement('div');
+  labelEl.dataset.role = 'label';
+  labelEl.textContent = label.length > 24 ? `${label.slice(0, 23)}…` : label;
+  labelEl.style.cssText = 'overflow: hidden; text-overflow: ellipsis; white-space: nowrap;';
+  card.appendChild(labelEl);
+
+  if (typeLabel) {
+    const typeEl = document.createElement('div');
+    typeEl.dataset.role = 'type';
+    typeEl.textContent = typeLabel;
+    typeEl.style.cssText = 'font-size: 10px; font-weight: 400; opacity: 0.75; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;';
+    card.appendChild(typeEl);
+  }
+
+  card.addEventListener('click', (e) => {
+    e.stopPropagation();
+    onClickNode(node.id);
+  });
+  card.addEventListener('mouseenter', () => {
+    const s = parseFloat(card.dataset.scale ?? '1');
+    card.style.boxShadow = '0 6px 18px rgba(0,0,0,0.28), 0 2px 6px rgba(0,0,0,0.14)';
+    card.style.transform = `translate(-50%, -50%) scale(${s * 1.05})`;
+  });
+  card.addEventListener('mouseleave', () => {
+    const s = parseFloat(card.dataset.scale ?? '1');
+    card.style.boxShadow = '0 3px 12px rgba(0,0,0,0.22), 0 1px 3px rgba(0,0,0,0.10)';
+    card.style.transform = `translate(-50%, -50%) scale(${s})`;
+  });
+
+  return card;
+}
+
 function bucketCentralFanout(
   nodes: GraphNode[],
   edges: GraphEdge[],
@@ -1334,6 +1463,23 @@ export function SigmaGraphView({
   const onNodeClickRef = useRef(onNodeClick);
   const onFocusNodesRef = useRef(onFocusNodes);
   const onPaneClickRef = useRef(onPaneClick);
+  // Zoom-responsive card overlay refs
+  const overlayRef = useRef<HTMLDivElement | null>(null);
+  const overlayCardMapRef = useRef<Map<string, HTMLDivElement>>(new Map());
+  const cameraRatioRef = useRef<number>(1);
+  const visibleNodesMapRef = useRef<Map<string, GraphNode>>(new Map());
+  const childDegreeRef = useRef<Map<string, number>>(new Map());
+  const updateNodeOverlayRef = useRef<(() => void) | null>(null);
+  // Track which nodes are currently showing as cards (circle hidden) so we can
+  // restore them when they transition back to compact circle mode.
+  const cardModeNodesRef = useRef<Set<string>>(new Set());
+  // Saved Sigma attributes for nodes that were transitioned to card mode so
+  // we can restore them cleanly when reverting to circle mode.
+  const originalNodeAttrsRef = useRef<Map<string, { color: string; size: number; label: string }>>(new Map());
+  // Tracks the most zoomed-out ratio Sigma has ever used (set on animatedReset)
+  // so we can clamp the wheel zoom-out to never exceed "see all nodes".
+  const maxSeenRatioRef = useRef<number>(0);
+
   const [selectedEvidence, setSelectedEvidence] = useState<EdgeEvidence | null>(null);
   const [selectedBucket, setSelectedBucket] = useState<BucketSelection | null>(null);
   const [showAllEvidenceSources, setShowAllEvidenceSources] = useState(false);
@@ -1407,6 +1553,126 @@ export function SigmaGraphView({
       }
     };
   }, [isStreaming]);
+
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+
+  // Bubble-phase wheel listener on the wrapper.
+  //
+  // Sigma's own MouseCaptor calls e.stopPropagation() after it handles a wheel
+  // event — so if the scroll originated on the Sigma canvas, Sigma fires first
+  // (it's on containerRef in bubble phase) and the event never reaches us here.
+  //
+  // The ONLY events that reach this listener are those from the HTML card
+  // overlay (cards are inside overlayRef, a sibling of containerRef, so they
+  // never bubble through containerRef). For those we must:
+  //   1. Prevent page scroll (e.preventDefault)
+  //   2. Manually drive Sigma's camera using getViewportZoomedState — Sigma's
+  //      own zoom-to-cursor logic, guaranteed to produce correct coordinates.
+  useEffect(() => {
+    const el = wrapperRef.current;
+    if (!el) return;
+    const handleWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const renderer = rendererRef.current as any;
+      const container = containerRef.current;
+      if (!renderer || !container) return;
+      const camera = renderer.getCamera();
+      const delta = e.deltaY * -3 / 360;
+      if (!delta) return;
+      const ZOOMING_RATIO = 1.7;
+      const ratioDiff = delta > 0 ? 1 / ZOOMING_RATIO : ZOOMING_RATIO;
+      const currentRatio = camera.getState().ratio;
+      const maxRatio = Math.max(maxSeenRatioRef.current * 1.1, 1);
+      const newRatio = Math.min(Math.max(currentRatio * ratioDiff, 0.01), maxRatio);
+      if (currentRatio === newRatio) return;
+      const rect = container.getBoundingClientRect();
+      const mousePos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+      const newState = renderer.getViewportZoomedState(mousePos, newRatio);
+      camera.animate(newState, { easing: 'quadraticOut', duration: 250 });
+    };
+    // passive: false required to allow e.preventDefault() for page-scroll prevention.
+    el.addEventListener('wheel', handleWheel, { passive: false });
+    return () => el.removeEventListener('wheel', handleWheel);
+  }, []);
+
+  // Keep the overlay function ref always pointing at the latest closure so the
+  // camera + afterRender listeners (registered once) always call current code.
+  updateNodeOverlayRef.current = () => {
+    const renderer = rendererRef.current;
+    const overlay = overlayRef.current;
+    const graph = graphRef.current;
+    if (!renderer || !overlay || !graph) return;
+
+    const ratio = cameraRatioRef.current;
+    let needsRefresh = false;
+
+    for (const [nodeId, card] of overlayCardMapRef.current) {
+      if (!graph.hasNode(nodeId) || isSigmaHaloNodeId(nodeId)) {
+        card.style.display = 'none';
+        continue;
+      }
+      const node = visibleNodesMapRef.current.get(nodeId);
+      if (!node) { card.style.display = 'none'; continue; }
+
+      const childCount = childDegreeRef.current.get(nodeId) ?? 0;
+      const alwaysExpanded = isAlwaysExpandedNode(node, childCount);
+      const showCard = ratio < EXPAND_ZOOM_THRESHOLD || alwaysExpanded;
+
+      if (!showCard) {
+        card.style.display = 'none';
+        // Restore Sigma circle if this node was in card mode
+        if (cardModeNodesRef.current.has(nodeId)) {
+          const original = originalNodeAttrsRef.current.get(nodeId);
+          if (original) {
+            graph.mergeNodeAttributes(nodeId, original);
+            needsRefresh = true;
+          }
+          cardModeNodesRef.current.delete(nodeId);
+        }
+        continue;
+      }
+
+      // --- Show the card ---
+      const nx = graph.getNodeAttribute(nodeId, 'x') as number;
+      const ny = graph.getNodeAttribute(nodeId, 'y') as number;
+      if (!Number.isFinite(nx) || !Number.isFinite(ny)) continue;
+
+      const vp = renderer.graphToViewport({ x: nx, y: ny });
+      card.style.left = `${vp.x}px`;
+      card.style.top = `${vp.y}px`;
+
+      // Scale the card exactly like a Sigma circle would scale — proportional
+      // to zoom so the card shrinks as you zoom out and grows as you zoom in.
+      // Cap at 1.15 so text doesn't become enormous at very high zoom.
+      // No minimum floor: the card naturally shrinks to nothing when zoomed far out.
+      const scale = Math.min(1.15, EXPAND_ZOOM_THRESHOLD / Math.max(ratio, 0.05));
+      card.dataset.scale = String(scale);
+      card.style.transform = `translate(-50%, -50%) scale(${scale})`;
+
+      if (card.style.display !== 'flex') card.style.display = 'flex';
+
+      // Hide the underlying Sigma circle so only the HTML card is visible.
+      // Also suppress the Sigma label to prevent duplicate text next to circle.
+      if (!cardModeNodesRef.current.has(nodeId)) {
+        graph.mergeNodeAttributes(nodeId, {
+          color: 'rgba(0,0,0,0)',
+          size: 0.5,
+          label: '',
+          forceLabel: false,
+        });
+        cardModeNodesRef.current.add(nodeId);
+        needsRefresh = true;
+      }
+    }
+
+    // Only call refresh if Sigma graph attributes actually changed.
+    // Guard prevents afterRender → updateNodeOverlay → refresh → afterRender loop.
+    if (needsRefresh) {
+      renderer.refresh();
+    }
+  };
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -1524,6 +1790,20 @@ export function SigmaGraphView({
         onPaneClickRef.current?.();
       });
       rendererRef.current.getCamera().animatedReset({ duration: 350 });
+
+      // Zoom-responsive: track camera ratio and sync card overlay positions +
+      // Sigma circle visibility on every camera change.
+      rendererRef.current.getCamera().on('updated', (state) => {
+        cameraRatioRef.current = state.ratio;
+        if (state.ratio > maxSeenRatioRef.current) maxSeenRatioRef.current = state.ratio;
+        updateNodeOverlayRef.current?.();
+      });
+
+      // After every Sigma render, sync card pixel positions so they follow
+      // node tween animations without a React render cycle.
+      rendererRef.current.on('afterRender', () => {
+        updateNodeOverlayRef.current?.();
+      });
     }
 
     const graph = graphRef.current;
@@ -1620,6 +1900,26 @@ export function SigmaGraphView({
     edgesToDrop.forEach(edgeId => graph.dropEdge(edgeId));
     nodesToDrop.forEach(nodeId => graph.dropNode(nodeId));
 
+    // Clean up overlay cards and card-mode state for nodes dropped from the graph.
+    nodesToDrop.forEach(nodeId => {
+      const card = overlayCardMapRef.current.get(nodeId);
+      if (card) {
+        card.remove();
+        overlayCardMapRef.current.delete(nodeId);
+      }
+      cardModeNodesRef.current.delete(nodeId);
+      originalNodeAttrsRef.current.delete(nodeId);
+    });
+
+    // Keep up-to-date maps used by updateNodeOverlay.
+    visibleNodesMapRef.current = new Map(visibleNodes.map(n => [n.id, n]));
+    const degMap = new Map<string, number>();
+    for (const edge of visibleEdges) {
+      degMap.set(edge.source, (degMap.get(edge.source) ?? 0) + 1);
+      degMap.set(edge.target, (degMap.get(edge.target) ?? 0) + 1);
+    }
+    childDegreeRef.current = degMap;
+
     const addOrUpdateHalo = () => {
       if (!haloId || !centerId) return;
       const centerPosition = positions.get(centerId);
@@ -1637,7 +1937,7 @@ export function SigmaGraphView({
         y: centerPosition.y,
         label: '',
         size: restSize + (breatheCenter ? breathingOffsetRef.current : 0),
-        color: 'rgba(17, 24, 39, 0.16)',
+        color: 'rgba(79, 70, 229, 0.18)',
         forceLabel: false,
         zIndex: 0,
       };
@@ -1663,7 +1963,7 @@ export function SigmaGraphView({
         y: activePosition.y,
         label: '',
         size: restSize + breathingOffsetRef.current,
-        color: 'rgba(15, 23, 42, 0.18)',
+        color: 'rgba(99, 102, 241, 0.20)',
         forceLabel: false,
         zIndex: 0,
       };
@@ -1733,6 +2033,16 @@ export function SigmaGraphView({
         : baseAttrs;
       const firstSeenAt = firstSeenAtRef.current.get(node.id);
       const isSticky = firstSeenAt !== undefined && performance.now() - firstSeenAt > STICKY_NODE_AFTER_MS && centerId === previousCenterIdRef.current;
+      // Save the "intended" attrs for this node so updateNodeOverlay can
+      // restore them when the node transitions back from card → circle mode.
+      if (!isSigmaHaloNodeId(node.id)) {
+        originalNodeAttrsRef.current.set(node.id, {
+          color: attrs.color,
+          size: attrs.size,
+          label: attrs.label ?? '',
+        });
+      }
+
       if (!graph.hasNode(node.id)) {
         const startX = shouldAnimatePositions ? (centerPosition?.x ?? attrs.x) : attrs.x;
         const startY = shouldAnimatePositions ? (centerPosition?.y ?? attrs.y) : attrs.y;
@@ -1745,6 +2055,16 @@ export function SigmaGraphView({
         // as "something appeared" rather than just popping in. The pulse
         // self-removes after 600ms and is skipped in overview mode.
         spawnFirstPaintPulse(node, { x: attrs.x, y: attrs.y });
+        // Create HTML overlay card for this new node (shown when zoomed in or
+        // when the node is a structural "always expanded" node).
+        if (!isSigmaHaloNodeId(node.id) && !overlayCardMapRef.current.has(node.id) && overlayRef.current) {
+          const card = createNodeCard(
+            node,
+            (id) => { onNodeClickRef.current?.(id); },
+          );
+          overlayRef.current.appendChild(card);
+          overlayCardMapRef.current.set(node.id, card);
+        }
       } else {
         const current = graph.getNodeAttributes(node.id) as Partial<SigmaNodeAttributes>;
         const fromX = typeof current.x === 'number' ? current.x : attrs.x;
@@ -1755,6 +2075,18 @@ export function SigmaGraphView({
         if (shouldAnimatePositions && !isSticky && (Math.abs(fromX - attrs.x) > 0.01 || Math.abs(fromY - attrs.y) > 0.01)) {
           nodeTweens.push({ id: node.id, fromX, fromY, toX: attrs.x, toY: attrs.y });
         }
+      }
+
+      // If this node is currently in card mode, re-apply the hidden-circle
+      // state immediately after the graph update (prevents a flash where the
+      // circle briefly reappears during graph re-renders).
+      if (!isSigmaHaloNodeId(node.id) && cardModeNodesRef.current.has(node.id) && graph.hasNode(node.id)) {
+        graph.mergeNodeAttributes(node.id, {
+          color: 'rgba(0,0,0,0)',
+          size: 0.5,
+          label: '',
+          forceLabel: false,
+        });
       }
     };
 
@@ -2045,6 +2377,7 @@ export function SigmaGraphView({
 
   return (
     <div
+      ref={wrapperRef}
       className="absolute inset-0"
       style={{
         // Reserve space at the bottom so Sigma's auto-fit doesn't park
@@ -2053,6 +2386,12 @@ export function SigmaGraphView({
       }}
     >
       <div ref={containerRef} className="h-full w-full" />
+      {/* HTML card overlay — cards are created imperatively and positioned via afterRender */}
+      <div
+        ref={overlayRef}
+        className="absolute inset-0 overflow-hidden"
+        style={{ pointerEvents: 'none', zIndex: 5 }}
+      />
       {nodes.length > 0 && (
         <div className="absolute bottom-4 right-4 z-20 flex flex-col items-end gap-2">
           <div

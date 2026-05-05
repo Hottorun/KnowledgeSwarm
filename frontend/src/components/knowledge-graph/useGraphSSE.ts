@@ -4,6 +4,7 @@ import { openRunStream } from '@/lib/api';
 import type { GraphEdge, GraphNode, GraphNodeData } from './graphTypes';
 import type { GraphLayoutNode } from './layout';
 import type { AIReasoningStep } from './types';
+import { cleanGraph } from './cleanGraph';
 
 // ── SSE payload types ─────────────────────────────────────────────────────────
 
@@ -325,34 +326,35 @@ export function useGraphSSE(opts: UseGraphSSEOptions) {
           ];
 
           void runLayoutAsync(allInputNodes, allEdges, userMovedRef.current).then(positions => {
-            // MERGE into whatever's currently in React state — never overwrite
-            // from a (possibly-stale) snapshot. Two SSE bursts arriving close
-            // together can spawn overlapping worker calls; if worker B's debounce
-            // fired before worker A's setNodes was committed to nodesRef, B's
-            // snapshot would be empty and overwrite A's results.
-            setNodes(prev => {
-              const existingIds = new Set(prev.map(n => n.id));
-              const updated = prev.map(n =>
-                positions[n.id]
-                  ? { ...n, position: positions[n.id], style: { ...n.style, opacity: 1 } }
-                  : n,
-              );
-              const additions = pNodes
-                .filter(n => !existingIds.has(n.id))
-                .map(n => ({
-                  ...n,
-                  position: positions[n.id] ?? n.position,
-                  style: { ...n.style, opacity: 1 },
-                })) as GraphNode[];
-              const merged = [...updated, ...additions];
-              return assignAnimDelays(merged, [...edgesRef.current, ...pEdges]).nodes;
-            });
-            setEdges(prev => {
-              const existingIds = new Set(prev.map(e => e.id));
-              const additions = pEdges.filter(e => !existingIds.has(e.id));
-              if (additions.length === 0) return prev;
-              return [...prev, ...additions];
-            });
+            // Build the positioned merged set from ref snapshots.
+            // nodesRef mirrors committed React state (synced via effect in the
+            // canvas) and is safe to read here — the 600ms debounce guarantees
+            // the SSE burst has settled so no concurrent worker call is in flight.
+            const existingSnapIds = new Set(nodesRef.current.map(n => n.id));
+            const updatedSnap = nodesRef.current.map(n =>
+              positions[n.id]
+                ? { ...n, position: positions[n.id], style: { ...n.style, opacity: 1 } }
+                : n,
+            );
+            const additionSnap = pNodes
+              .filter(n => !existingSnapIds.has(n.id))
+              .map(n => ({
+                ...n,
+                position: positions[n.id] ?? n.position,
+                style: { ...n.style, opacity: 1 },
+              })) as GraphNode[];
+
+            const allEdgesSnap = [...edgesRef.current, ...pEdges];
+
+            // Clean the full merged graph before committing to React state.
+            const { nodes: cleanNodes, edges: cleanEdges } = cleanGraph(
+              [...updatedSnap, ...additionSnap],
+              allEdgesSnap,
+            );
+            const { nodes: animNodes } = assignAnimDelays(cleanNodes, cleanEdges);
+
+            setNodes(() => animNodes);
+            setEdges(() => cleanEdges);
             // Don't clear isProcessing here — that's the FIRST batch settling,
             // not the run completing. The processing indicator should remain
             // until the orchestrator emits run.completed / run.failed.
