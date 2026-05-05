@@ -175,9 +175,17 @@ export function buildPresentationTriples(
 
 // When a parent has more than this many direct children, the
 // SubCategorizerAgent splits them into 3–7 named subcategories so the tree
-// stays readable as the data grows.
-const SUBCATEGORY_FANOUT_THRESHOLD = 18;
-const SUBCATEGORY_MAX_DEPTH = 3;
+// stays readable as the data grows. Lower threshold = more branching =
+// users navigate via real hierarchy ("Finance → Revenue → Q3 Report")
+// instead of clicking "+N more" buckets to reveal hidden children. We
+// prefer deeper trees over hidden lists.
+const SUBCATEGORY_FANOUT_THRESHOLD = 7;
+// No fixed depth cap — recursion stops naturally when no parent in a pass
+// has > THRESHOLD children, which is the only condition that matters for
+// readability. We keep a soft budget on total subcategorizer calls per
+// run so a pathological dataset can't burn unbounded API spend.
+const SUBCATEGORY_MAX_PASSES = 32;
+const SUBCATEGORY_MAX_CALLS_PER_RUN = 128;
 
 // Walk every parent in `presentationTriples` and, for any whose
 // `contains` fanout exceeds the threshold, ask the SubCategorizerAgent to
@@ -194,7 +202,9 @@ export async function splitOversizedSubtrees(
   presentationTriples: Triple[],
 ): Promise<Triple[]> {
   let working = [...presentationTriples];
-  for (let depth = 0; depth < SUBCATEGORY_MAX_DEPTH; depth++) {
+  let totalCalls = 0;
+  for (let pass = 0; pass < SUBCATEGORY_MAX_PASSES; pass++) {
+    if (totalCalls >= SUBCATEGORY_MAX_CALLS_PER_RUN) break;
     const childrenByParent = new Map<string, { parent: GraphNode; children: GraphNode[]; triples: Triple[] }>();
     for (const triple of working) {
       if (triple.predicate !== 'contains') continue;
@@ -214,6 +224,8 @@ export async function splitOversizedSubtrees(
 
     for (const [parentId, entry] of childrenByParent) {
       if (entry.children.length <= SUBCATEGORY_FANOUT_THRESHOLD) continue;
+      if (totalCalls >= SUBCATEGORY_MAX_CALLS_PER_RUN) break;
+      totalCalls++;
       const parentLabel = entry.parent.label || parentId;
       const groups = await subCategorize(
         runId,

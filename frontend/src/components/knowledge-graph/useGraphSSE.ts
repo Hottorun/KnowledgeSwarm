@@ -259,22 +259,41 @@ export function useGraphSSE(opts: UseGraphSSEOptions) {
       }
 
       if (anchor) {
+        // Sequential subtree reveal: stagger each new expansion node so the
+        // subtree appears as a wave from the anchor outward instead of all
+        // at once. Index taken before .add so the first new node is delay 0.
+        const expansionIdx = expansionNewNodesRef.current.size;
+        const stepMs = 90;
+        const newNodeWithDelay: GraphLayoutNode = {
+          ...newNode,
+          data: { ...newNode.data, animDelay: (expansionIdx * stepMs) / 1000 },
+        };
         // Track this node so chain edges (newNode → newerNode) survive the
         // anchor-scope filter in edge.created — without this, intermediate
         // category nodes would never get their child items attached.
         expansionNewNodesRef.current.add(backendNode.id);
         // Expansion: commit immediately so the user sees progress
-        setNodes(prev => upsertNodeById(prev, newNode));
+        setNodes(prev => upsertNodeById(prev, newNodeWithDelay));
         const bridgeEdgeId = `e-expand-${anchor.id}-${backendNode.id}`;
+        // Edge fades in shortly after the target node so it reads as
+        // drawing out *from* the anchor rather than appearing first.
+        const bridgeAnimDelay = (expansionIdx * stepMs) / 1000 + 0.18;
         setEdges(prev => prev.some(ex => ex.id === bridgeEdgeId) ? prev : [...prev, {
           id: bridgeEdgeId, source: anchor.id, target: backendNode.id,
           label: 'expands', type: 'floating',
+          data: { animDelay: bridgeAnimDelay },
         }]);
       } else if (queryModeRef.current) {
+        const queryIdx = expansionNewNodesRef.current.size;
+        const stepMs = 90;
+        const newNodeWithDelay: GraphLayoutNode = {
+          ...newNode,
+          data: { ...newNode.data, animDelay: (queryIdx * stepMs) / 1000 },
+        };
         // Query mode: commit immediately but no bridge edge; Sigma keeps the
         // camera stable while the graph updates.
         expansionNewNodesRef.current.add(backendNode.id);
-        setNodes(prev => upsertNodeById(prev, newNode));
+        setNodes(prev => upsertNodeById(prev, newNodeWithDelay));
       } else {
         if (appendModeRef.current) {
           // Document uploads after the first graph should extend the current
@@ -388,11 +407,23 @@ export function useGraphSSE(opts: UseGraphSSEOptions) {
 
       const edgeSource = sourceInGraph ? backendEdge.source : (anchor?.id ?? backendEdge.source);
       const edgeId = `${edgeSource}:${backendEdge.predicate}:${backendEdge.target}`;
+      // Inherit the target's expansion stagger so the edge draws in just
+      // after its endpoint nodes appear, matching the bridge-edge behaviour.
+      let inheritedAnimDelay: number | undefined;
+      if (anchor) {
+        const targetNode = nodesRef.current.find(n => n.id === backendEdge.target);
+        const sourceNode = nodesRef.current.find(n => n.id === edgeSource);
+        const targetDelay = (targetNode?.data as { animDelay?: number } | undefined)?.animDelay;
+        const sourceDelay = (sourceNode?.data as { animDelay?: number } | undefined)?.animDelay;
+        const maxDelay = Math.max(typeof targetDelay === 'number' ? targetDelay : 0, typeof sourceDelay === 'number' ? sourceDelay : 0);
+        if (maxDelay > 0) inheritedAnimDelay = maxDelay + 0.18;
+      }
       const edgeData = {
         confidence: backendEdge.confidence,
         sources: backendEdge.sources ?? [],
         sourceLabel: formatSourceLabel(backendEdge.sources ?? []),
         properties: backendEdge.properties ?? {},
+        ...(inheritedAnimDelay !== undefined ? { animDelay: inheritedAnimDelay } : {}),
       };
 
       if (anchor) {

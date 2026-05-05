@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import type { AIReasoningStep } from './types';
 import type { GraphEdge, GraphNode, GraphNodeData } from './graphTypes';
-import type { NodeCategory } from '@/lib/api';
+import { describeNode, type NodeCategory } from '@/lib/api';
 
 function isDocumentNode(node: GraphNode): boolean {
   const data = node.data as GraphNodeData;
@@ -13,13 +13,89 @@ function isDocumentNode(node: GraphNode): boolean {
 
 function DocumentList({
   nodes,
+  edges,
   onNodeFocus,
 }: {
   nodes: GraphNode[];
+  edges: GraphEdge[];
   onNodeFocus?: (nodeId: string) => void;
 }) {
-  const docs = nodes.filter(isDocumentNode);
-  if (docs.length === 0) return null;
+  // Old code (when documents were graph nodes) — keep for back-compat in
+  // case the orchestrator ever re-emits them.
+  const docNodes = nodes.filter(isDocumentNode);
+
+  // New path: derive documents from edge sources. The orchestrator no
+  // longer emits document nodes (the tree is main → category → entity),
+  // but each `category → contains → entity` triple still carries its
+  // source filename in `data.sources[0].title`. Surface those as a flat
+  // list so the user can still see "what files built this graph".
+  const docMap = new Map<string, { title: string; nodeIds: Set<string> }>();
+  for (const edge of edges) {
+    const sources = (edge.data as { sources?: Array<{ title?: string; url?: string }> } | undefined)?.sources ?? [];
+    for (const source of sources) {
+      const title = source.title || source.url;
+      if (!title) continue;
+      const entry = docMap.get(title) ?? { title, nodeIds: new Set<string>() };
+      entry.nodeIds.add(edge.target);
+      entry.nodeIds.add(edge.source);
+      docMap.set(title, entry);
+    }
+  }
+  const derivedDocs = [...docMap.values()];
+
+  if (docNodes.length === 0 && derivedDocs.length === 0) return null;
+  // When real document nodes exist, render those (legacy). Otherwise
+  // render the derived list.
+  if (docNodes.length === 0 && derivedDocs.length > 0) {
+    return (
+      <div className="mb-4">
+        <div className="flex items-center justify-between px-2 mb-1.5">
+          <span
+            className="text-[10px] font-semibold uppercase tracking-wider"
+            style={{ color: 'var(--muted-foreground)' }}
+          >
+            Documents
+          </span>
+          <span
+            className="text-[10px] px-1.5 py-0.5 rounded-full font-medium"
+            style={{ background: 'var(--secondary)', color: 'var(--muted-foreground)', border: '1px solid var(--border)' }}
+          >
+            {derivedDocs.length}
+          </span>
+        </div>
+        <div className="space-y-0.5">
+          {derivedDocs.map(doc => (
+            <button
+              key={doc.title}
+              onClick={() => {
+                // Focus all nodes mentioned in this document by handing
+                // off to onNodeFocus repeatedly — pick the first one as
+                // the camera target since onNodeFocus is single-id.
+                const first = [...doc.nodeIds][0];
+                if (first) onNodeFocus?.(first);
+              }}
+              className="w-full flex items-center gap-2 text-left rounded-lg px-2 py-1.5 transition-colors hover:bg-accent"
+              style={{ color: 'var(--foreground)' }}
+              title={`${doc.nodeIds.size} entities mentioned`}
+            >
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none" style={{ color: 'var(--muted-foreground)', flexShrink: 0 }}>
+                <path d="M3 2h7l3 3v9H3V2z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+              </svg>
+              <span className="text-xs truncate flex-1">{doc.title}</span>
+              <span
+                className="text-[10px] px-1.5 py-0.5 rounded-full"
+                style={{ background: 'var(--secondary)', color: 'var(--muted-foreground)' }}
+              >
+                {doc.nodeIds.size}
+              </span>
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  const docs = docNodes;
   return (
     <div className="mb-4">
       <div className="flex items-center justify-between px-2 mb-1.5">
@@ -320,36 +396,141 @@ function LeftTabButton({
 function SelectedNodeContent({
   node,
   onNodeFocus,
+  onAction,
+  onDelete,
 }: {
   node: SelectedNodeInfo;
   onNodeFocus?: (id: string) => void;
+  onAction?: (action: string, prompt: string) => void;
+  onDelete?: () => void;
 }) {
+  const [aiDescription, setAiDescription] = useState<string | null>(null);
+  const [descLoading, setDescLoading] = useState(true);
+  const [prompt, setPrompt] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    setDescLoading(true);
+    setAiDescription(null);
+    describeNode(node.label, node.type ?? 'Entity', node.relationships).then(desc => {
+      if (!cancelled) {
+        setAiDescription(desc);
+        setDescLoading(false);
+      }
+    });
+    return () => { cancelled = true; };
+  }, [node.id, node.label, node.type]);
+
   return (
     <div className="space-y-4">
       <div>
-        {node.type && (
-          <div
-            className="text-[10px] font-semibold uppercase tracking-wider mb-1"
-            style={{ color: 'var(--muted-foreground)' }}
-          >
-            {node.type}
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0 flex-1">
+            {node.type && (
+              <div
+                className="text-[10px] font-semibold uppercase tracking-wider mb-1"
+                style={{ color: 'var(--muted-foreground)' }}
+              >
+                {node.type}
+              </div>
+            )}
+            <h2
+              className="text-base font-semibold leading-tight break-words"
+              style={{ color: 'var(--foreground)' }}
+            >
+              {node.label}
+            </h2>
           </div>
-        )}
-        <h2
-          className="text-base font-semibold leading-tight break-words"
-          style={{ color: 'var(--foreground)' }}
-        >
-          {node.label}
-        </h2>
+          {onDelete && (
+            <button
+              onClick={onDelete}
+              className="shrink-0 w-7 h-7 rounded-lg flex items-center justify-center text-xs transition-colors hover:bg-accent"
+              style={{ color: 'var(--muted-foreground)' }}
+              title="Delete node"
+            >
+              🗑
+            </button>
+          )}
+        </div>
       </div>
 
-      {node.description && (
-        <p
-          className="text-xs leading-relaxed"
-          style={{ color: 'var(--muted-foreground)' }}
-        >
-          {node.description}
-        </p>
+      {/* AI summary */}
+      <div>
+        {descLoading ? (
+          <div className="flex items-center gap-1.5">
+            <span
+              className="inline-block w-3 h-3 rounded-full animate-pulse"
+              style={{ background: 'var(--kg-blob-1)' }}
+            />
+            <span className="text-[11px]" style={{ color: 'var(--muted-foreground)' }}>
+              Generating summary…
+            </span>
+          </div>
+        ) : aiDescription ? (
+          <p className="text-xs leading-relaxed" style={{ color: 'var(--muted-foreground)' }}>
+            {aiDescription}
+          </p>
+        ) : node.description ? (
+          <p className="text-xs leading-relaxed" style={{ color: 'var(--muted-foreground)' }}>
+            {node.description}
+          </p>
+        ) : null}
+      </div>
+
+      {/* Ask input + expand actions */}
+      {onAction && (
+        <div className="space-y-2">
+          <input
+            value={prompt}
+            onChange={e => setPrompt(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                onAction(prompt.trim() ? 'details' : 'categories', prompt.trim());
+                setPrompt('');
+              }
+            }}
+            placeholder="Ask a specific question about this node…"
+            className="w-full rounded-lg px-3 py-2 text-xs outline-none transition-colors"
+            style={{
+              background: 'var(--secondary)',
+              border: '1px solid var(--border)',
+              color: 'var(--foreground)',
+            }}
+          />
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              onClick={() => { onAction('categories', prompt.trim()); setPrompt(''); }}
+              className="rounded-lg px-3 py-2 text-xs font-medium transition-colors hover:bg-accent"
+              style={{
+                background: 'var(--secondary)',
+                border: '1px solid var(--border)',
+                color: 'var(--foreground)',
+              }}
+              title="Broader sub-categories — keeps things abstract"
+            >
+              <span className="block font-semibold">🗂 Categories</span>
+              <span className="block text-[10px] mt-0.5" style={{ color: 'var(--muted-foreground)' }}>
+                Broad sub-categories
+              </span>
+            </button>
+            <button
+              onClick={() => { onAction('details', prompt.trim()); setPrompt(''); }}
+              className="rounded-lg px-3 py-2 text-xs font-medium transition-colors hover:bg-accent"
+              style={{
+                background: 'var(--secondary)',
+                border: '1px solid var(--border)',
+                color: 'var(--foreground)',
+              }}
+              title="Specific facts, names, numbers"
+            >
+              <span className="block font-semibold">🔬 Details</span>
+              <span className="block text-[10px] mt-0.5" style={{ color: 'var(--muted-foreground)' }}>
+                Specific facts
+              </span>
+            </button>
+          </div>
+        </div>
       )}
 
       {node.relationships.length > 0 && (
@@ -376,7 +557,7 @@ function SelectedNodeContent({
                   key={i}
                   className="rounded-lg px-3 py-2 transition-colors hover:bg-accent cursor-pointer"
                   style={{ background: 'var(--secondary)', border: '1px solid var(--border)' }}
-                  onClick={() => onNodeFocus?.(rel.otherLabel)}
+                  onClick={() => rel.otherId && onNodeFocus?.(rel.otherId)}
                   title="Focus this connection"
                 >
                   <div className="flex items-baseline gap-1.5 text-xs leading-snug">
@@ -423,6 +604,7 @@ function SelectedNodeContent({
 export interface SelectedNodeRelationship {
   direction: 'in' | 'out';
   predicate: string;
+  otherId?: string;
   otherLabel: string;
   sources?: Array<{ title?: string; url?: string; snippet?: string }>;
 }
@@ -447,11 +629,13 @@ interface SidePanelProps {
   reasoningSteps?: AIReasoningStep[];
   selectedNode?: SelectedNodeInfo | null;
   onSelectedNodeClose?: () => void;
+  onSelectedNodeAction?: (action: string, prompt: string) => void;
+  onSelectedNodeDelete?: () => void;
 }
 
-type LeftTab = 'contents' | 'selected';
+type LeftTab = 'contents' | 'documents' | 'selected';
 
-export function SidePanel({ side, isOpen, onClose, nodes = [], edges = [], onNodeFocus, onFocusMultiple, categories = [], reasoningSteps = [], selectedNode = null, onSelectedNodeClose }: SidePanelProps) {
+export function SidePanel({ side, isOpen, onClose, nodes = [], edges = [], onNodeFocus, onFocusMultiple, categories = [], reasoningSteps = [], selectedNode = null, onSelectedNodeClose, onSelectedNodeAction, onSelectedNodeDelete }: SidePanelProps) {
   const isLeft = side === 'left';
   const reasoningBottomRef = useRef<HTMLDivElement>(null);
   const [activeTab, setActiveTab] = useState<LeftTab>('contents');
@@ -462,6 +646,24 @@ export function SidePanel({ side, isOpen, onClose, nodes = [], edges = [], onNod
   useEffect(() => {
     if (selectedNode) setActiveTab('selected');
   }, [selectedNode?.id]);
+
+  // Compute document count up-front so the Documents tab can show a badge
+  // and we can hide it when there are zero documents. Mirrors the logic in
+  // <DocumentList /> — derived from edge sources or document graph nodes.
+  const documentCount = (() => {
+    if (!isLeft) return 0;
+    const docNodes = nodes.filter(isDocumentNode);
+    if (docNodes.length > 0) return docNodes.length;
+    const titles = new Set<string>();
+    for (const edge of edges) {
+      const sources = (edge.data as { sources?: Array<{ title?: string; url?: string }> } | undefined)?.sources ?? [];
+      for (const source of sources) {
+        const title = source.title || source.url;
+        if (title) titles.add(title);
+      }
+    }
+    return titles.size;
+  })();
 
   useEffect(() => {
     if (!isLeft && reasoningSteps.length > 0) {
@@ -564,10 +766,15 @@ export function SidePanel({ side, isOpen, onClose, nodes = [], edges = [], onNod
           <div className="p-5 overflow-y-auto" style={{ height: `calc(100% - ${isLeft && selectedNode ? 102 : 57}px)` }}>
             {isLeft ? (
               activeTab === 'selected' && selectedNode ? (
-                <SelectedNodeContent node={selectedNode} onNodeFocus={onNodeFocus} />
+                <SelectedNodeContent
+                  node={selectedNode}
+                  onNodeFocus={onNodeFocus}
+                  onAction={onSelectedNodeAction}
+                  onDelete={onSelectedNodeDelete}
+                />
               ) : (
                 <>
-                  <DocumentList nodes={nodes} onNodeFocus={onNodeFocus} />
+                  <DocumentList nodes={nodes} edges={edges} onNodeFocus={onNodeFocus} />
                   {categories.length > 0 ? (
                     <CategoryList categories={categories} nodes={nodes} onFocusMultiple={onFocusMultiple} onNodeFocus={onNodeFocus} />
                   ) : tocRoots.length === 0 ? (

@@ -629,13 +629,18 @@ function KnowledgeGraphCanvasInner() {
         const sources = ((e.data as { sources?: BackendSource[] } | undefined)?.sources ?? []);
         if (e.source === node.id) {
           const other = nodes.find(n => n.id === e.target);
-          return { direction: 'out' as const, predicate, otherLabel: (other?.data as GraphNodeData)?.label ?? e.target, sources };
+          return { direction: 'out' as const, predicate, otherId: e.target, otherLabel: (other?.data as GraphNodeData)?.label ?? e.target, sources };
         } else {
           const other = nodes.find(n => n.id === e.source);
-          return { direction: 'in' as const, predicate, otherLabel: (other?.data as GraphNodeData)?.label ?? e.source, sources };
+          return { direction: 'in' as const, predicate, otherId: e.source, otherLabel: (other?.data as GraphNodeData)?.label ?? e.source, sources };
         }
       });
     setSelectedNodeRelationships(rels);
+
+    // Open the Contents sidebar so the Selected-Node tab shows up next to
+    // the floating popup. The sidebar gives a stable, scrollable surface
+    // for long connection lists; the popup stays for quick actions.
+    setLeftPanel(true);
 
     // Pin the popup to the left-middle of the screen so it never overlaps
     // the focused node (which may now be re-positioned anywhere) and never
@@ -968,7 +973,13 @@ function KnowledgeGraphCanvasInner() {
     setInputBoxPos(null);
     setHighlightedNodes(new Set());
     setAiHighlightedNodes(new Set());
-    setLeftPanel(false);
+    setSelectedNodeRelationships([]);
+    // Clear the focal dim (active node halo + dimmed surroundings) on
+    // canvas click so the user can deselect without first opening another
+    // panel or clicking another node. We deliberately keep the Contents
+    // panel open if it was already open — closing it would feel like a
+    // second, unrequested action.
+    setActiveNodeId(null);
     // Clicking empty pane re-clusters: drop back to neighborhood
     setShowAllNodes(false);
   }, []);
@@ -1107,6 +1118,7 @@ function KnowledgeGraphCanvasInner() {
         activeNodeId={activeNodeId}
         highlightedNodes={new Set([...highlightedNodes, ...aiHighlightedNodes])}
         sigmaViewMode="overview"
+        isStreaming={isProcessing}
         onSigmaNodeClick={handleSigmaNodeClick}
         onSigmaFocusNodes={handleFocusMultiple}
         onPaneClick={handlePaneClick}
@@ -1183,7 +1195,7 @@ function KnowledgeGraphCanvasInner() {
             onDelete={handleDeleteDocument}
             onClose={() => { setSelectedNode(null); setInputBoxPos(null); setSelectedNodeRelationships([]); setHighlightedNodes(new Set()); setNodes(nds => nds.map(n => ({ ...n, selected: false }))); }}
           />
-        ) : selectedNode && inputBoxPos ? (
+        ) : selectedNode && inputBoxPos && !leftPanel ? (
           <NodeInputBox
             nodeLabel={(selectedNode.data as GraphNodeData).label}
             entityType={(selectedNode.data as GraphNodeData).description}
@@ -1290,7 +1302,34 @@ function KnowledgeGraphCanvasInner() {
       )}
 
       {/* Side panels */}
-      <SidePanel side="left" isOpen={leftPanel} onClose={() => setLeftPanel(false)} nodes={nodes} edges={edges} onNodeFocus={handleNodeFocus} onFocusMultiple={handleFocusMultiple} categories={categories} />
+      <SidePanel
+        side="left"
+        isOpen={leftPanel}
+        onClose={() => setLeftPanel(false)}
+        nodes={nodes}
+        edges={edges}
+        onNodeFocus={handleNodeFocus}
+        onFocusMultiple={handleFocusMultiple}
+        categories={categories}
+        selectedNode={selectedNode ? {
+          id: selectedNode.id,
+          label: (selectedNode.data as GraphNodeData).label ?? selectedNode.id,
+          type: (selectedNode.data as GraphNodeData).description,
+          relationships: selectedNodeRelationships,
+        } : null}
+        onSelectedNodeClose={() => {
+          setSelectedNode(null);
+          setSelectedNodeRelationships([]);
+          setActiveNodeId(null);
+          setHighlightedNodes(new Set());
+        }}
+        onSelectedNodeAction={handleNodeAction}
+        onSelectedNodeDelete={
+          selectedNode
+            ? (isRealDocumentNode(selectedNode) ? handleDeleteDocument : handleDeleteNode)
+            : undefined
+        }
+      />
       <SidePanel side="right" isOpen={rightPanel} onClose={() => setRightPanel(false)} reasoningSteps={reasoningSteps} />
 
       {/* Floating query box — appears once the graph is loaded */}

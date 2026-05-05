@@ -12,6 +12,9 @@ interface SigmaGraphViewProps {
   activeNodeId?: string | null;
   highlightedNodes?: Set<string>;
   viewMode?: 'focused' | 'overview';
+  // While true, the active-centre halo gently breathes to signal that the
+  // orchestrator is still running. Driven by `isProcessing` in the canvas.
+  isStreaming?: boolean;
   onNodeClick?: (nodeId: string) => void;
   onFocusNodes?: (nodeIds: string[]) => void;
   onPaneClick?: () => void;
@@ -820,10 +823,15 @@ function stripDocumentNodes(nodes: GraphNode[]): GraphNode[] {
   return nodes.filter(node => !isDocumentNode(node));
 }
 
-// Maximum direct children rendered per parent at depth ≥ 1 before overflow
-// gets folded into a single bucket node. Smaller values keep the canvas
-// breathable as the data grows; the bucket is clickable to expand in place.
-const MAX_PARENT_FANOUT = 8;
+// Maximum direct children rendered per parent before overflow gets folded
+// into a single bucket node. The orchestrator's adaptive sub-categoriser
+// (Phase 2) is the primary tool for keeping the tree readable — it splits
+// crowded subtrees into AI-named layers so users can browse hierarchy
+// instead of clicking buckets to reveal hidden children. The bucket here
+// is a *last-resort* safety valve: only the truly extreme fanouts (20+
+// direct children that the sub-categoriser couldn't decompose for some
+// reason) get bucketed. Most graphs should never hit this threshold.
+const MAX_PARENT_FANOUT = 20;
 
 // Generalised progressive disclosure: every parent (any node that's the
 // source of one or more `contains` edges) gets capped at MAX_PARENT_FANOUT
@@ -1275,6 +1283,7 @@ export function SigmaGraphView({
   activeNodeId,
   highlightedNodes,
   viewMode = 'focused',
+  isStreaming = false,
   onNodeClick,
   onFocusNodes,
   onPaneClick,
@@ -1288,6 +1297,11 @@ export function SigmaGraphView({
   const positionFrameRef = useRef<number | null>(null);
   const previousNodeCountRef = useRef(0);
   const previousCenterIdRef = useRef<string | null | undefined>(null);
+  // Track active-node changes separately from centerId. centerId is pinned
+  // to the main entity (so clicks don't recenter the layout), which means
+  // it almost never changes — keying camera fly-to off centerChanged would
+  // make it fire only once on first paint.
+  const previousActiveIdRef = useRef<string | null | undefined>(null);
   const autoFitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const edgeByIdRef = useRef<Map<string, GraphEdge>>(new Map());
   const nodeLabelByIdRef = useRef<Map<string, string>>(new Map());
@@ -1295,6 +1309,26 @@ export function SigmaGraphView({
   const virtualBucketIdsRef = useRef<Set<string>>(new Set());
   const bucketMemberIdsRef = useRef<Map<string, string[]>>(new Map());
   const firstSeenAtRef = useRef<Map<string, number>>(new Map());
+  // First-paint pulse halos: rAF id keyed by pulse halo node id so we can
+  // cancel and clean up on unmount without leaking nodes/frames.
+  const pulseFramesRef = useRef<Map<string, number>>(new Map());
+  // Continuous breathing animation for the active-centre halo while the
+  // orchestrator is still running. The size offset is read by
+  // `addOrUpdateActiveHalo` so re-renders preserve the current breath
+  // phase instead of snapping back to the static base size.
+  const breathingFrameRef = useRef<number | null>(null);
+  const breathingOffsetRef = useRef(0);
+  const activeHaloIdRef = useRef<string | null>(null);
+  const activeHaloBaseSizeRef = useRef(0);
+  // Smooth dim transitions: previous focal-set membership + an in-flight
+  // rAF id so we can cancel and restart the tween on rapid selection
+  // changes. The render path applies target dim immediately; the rAF
+  // overrides for ~200ms to interpolate from the previous state.
+  const prevFocalSetRef = useRef<Set<string> | null>(null);
+  const dimAnimRafRef = useRef<number | null>(null);
+  // Per-edge draw-on tween rAF ids so we can cancel/cleanup on unmount and
+  // avoid leaking frames if an edge is dropped mid-animation.
+  const edgeDrawFramesRef = useRef<Map<string, number>>(new Map());
   const activeNodeIdRef = useRef(activeNodeId);
   const viewModeRef = useRef(viewMode);
   const onNodeClickRef = useRef(onNodeClick);
@@ -1317,6 +1351,62 @@ export function SigmaGraphView({
     activeNodeIdRef.current = activeNodeId;
     viewModeRef.current = viewMode;
   }, [activeNodeId, onFocusNodes, onNodeClick, onPaneClick, viewMode]);
+
+  // Breathing animation on the focal halo while orchestrator is streaming.
+  // Uses sine over a 2.4s period for a calm pulse (~±2.5px on the halo
+  // size). When `isStreaming` flips false, eases the offset back to 0 and
+  // then stops the rAF.
+  useEffect(() => {
+    if (!isStreaming) {
+      // Decay the offset to 0 so the halo settles instead of snapping.
+      const start = performance.now();
+      const startOffset = breathingOffsetRef.current;
+      const decayDuration = 320;
+      const decay = (now: number) => {
+        const t = Math.min(1, (now - start) / decayDuration);
+        breathingOffsetRef.current = startOffset * (1 - t);
+        const haloId = activeHaloIdRef.current;
+        if (haloId && graphRef.current?.hasNode(haloId)) {
+          graphRef.current.mergeNodeAttributes(haloId, {
+            size: activeHaloBaseSizeRef.current + breathingOffsetRef.current,
+          });
+          rendererRef.current?.refresh();
+        }
+        if (t < 1) {
+          breathingFrameRef.current = requestAnimationFrame(decay);
+        } else {
+          breathingFrameRef.current = null;
+          breathingOffsetRef.current = 0;
+        }
+      };
+      if (breathingFrameRef.current !== null) cancelAnimationFrame(breathingFrameRef.current);
+      breathingFrameRef.current = requestAnimationFrame(decay);
+      return;
+    }
+    const start = performance.now();
+    const periodMs = 2400;
+    const amplitude = 2.5;
+    const tick = (now: number) => {
+      const phase = ((now - start) / periodMs) * Math.PI * 2;
+      breathingOffsetRef.current = Math.sin(phase) * amplitude;
+      const haloId = activeHaloIdRef.current;
+      if (haloId && graphRef.current?.hasNode(haloId)) {
+        graphRef.current.mergeNodeAttributes(haloId, {
+          size: activeHaloBaseSizeRef.current + breathingOffsetRef.current,
+        });
+        rendererRef.current?.refresh();
+      }
+      breathingFrameRef.current = requestAnimationFrame(tick);
+    };
+    if (breathingFrameRef.current !== null) cancelAnimationFrame(breathingFrameRef.current);
+    breathingFrameRef.current = requestAnimationFrame(tick);
+    return () => {
+      if (breathingFrameRef.current !== null) {
+        cancelAnimationFrame(breathingFrameRef.current);
+        breathingFrameRef.current = null;
+      }
+    };
+  }, [isStreaming]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -1520,7 +1610,12 @@ export function SigmaGraphView({
       if (!edgeIds.has(String(edgeId))) edgesToDrop.push(String(edgeId));
     });
     graph.forEachNode(nodeId => {
-      if (!nodeIds.has(String(nodeId))) nodesToDrop.push(String(nodeId));
+      const id = String(nodeId);
+      // Transient first-paint pulse halos own their own rAF lifecycle and
+      // self-remove on completion. Skip them here so a re-render that fires
+      // before the rAF finishes doesn't yank them out mid-pulse.
+      if (id.startsWith(`${SIGMA_HALO_PREFIX}pulse:`)) return;
+      if (!nodeIds.has(id)) nodesToDrop.push(id);
     });
     edgesToDrop.forEach(edgeId => graph.dropEdge(edgeId));
     nodesToDrop.forEach(nodeId => graph.dropNode(nodeId));
@@ -1529,11 +1624,19 @@ export function SigmaGraphView({
       if (!haloId || !centerId) return;
       const centerPosition = positions.get(centerId);
       if (!centerPosition) return;
+      const restSize = viewMode === 'overview' ? 18 : 26;
+      // When the user hasn't clicked into a deeper node, the centre halo
+      // doubles as the focal halo — breathe it instead of the active halo.
+      const breatheCenter = !activeNodeId || activeNodeId === centerId;
+      if (breatheCenter) {
+        activeHaloIdRef.current = haloId;
+        activeHaloBaseSizeRef.current = restSize;
+      }
       const attrs: SigmaNodeAttributes = {
         x: centerPosition.x,
         y: centerPosition.y,
         label: '',
-        size: viewMode === 'overview' ? 18 : 26,
+        size: restSize + (breatheCenter ? breathingOffsetRef.current : 0),
         color: 'rgba(17, 24, 39, 0.16)',
         forceLabel: false,
         zIndex: 0,
@@ -1552,11 +1655,14 @@ export function SigmaGraphView({
       // outline regardless of the node's depth.
       const activeNode = visibleNodes.find(node => node.id === activeNodeId);
       const baseSize = activeNode ? nodeSize(activeNode, activeNodeId, viewMode) : 8;
+      const restSize = baseSize + (viewMode === 'overview' ? 4 : 6);
+      activeHaloIdRef.current = activeHaloId;
+      activeHaloBaseSizeRef.current = restSize;
       const attrs: SigmaNodeAttributes = {
         x: activePosition.x,
         y: activePosition.y,
         label: '',
-        size: baseSize + (viewMode === 'overview' ? 4 : 6),
+        size: restSize + breathingOffsetRef.current,
         color: 'rgba(15, 23, 42, 0.18)',
         forceLabel: false,
         zIndex: 0,
@@ -1568,11 +1674,62 @@ export function SigmaGraphView({
       }
     };
 
+    const spawnFirstPaintPulse = (node: GraphNode, position: { x: number; y: number }) => {
+      // Skip in overview — large graphs would spawn dozens of concurrent
+      // pulses, which is noisy and burns frames.
+      if (viewMode !== 'focused') return;
+      if (!rendererRef.current) return;
+      const pulseId = `${SIGMA_HALO_PREFIX}pulse:${node.id}`;
+      if (graph.hasNode(pulseId)) return;
+      const baseSize = nodeSize(node, activeNodeIdRef.current ?? null, viewMode);
+      const startSize = baseSize * 1.7;
+      graph.addNode(pulseId, {
+        x: position.x,
+        y: position.y,
+        label: '',
+        size: startSize,
+        color: 'rgba(15, 23, 42, 0.32)',
+        forceLabel: false,
+        zIndex: 0,
+      });
+      const start = performance.now();
+      const duration = 600;
+      const step = (now: number) => {
+        const t = Math.min(1, (now - start) / duration);
+        const eased = 1 - Math.pow(1 - t, 3);
+        const alpha = 0.32 * (1 - eased);
+        const size = startSize - (startSize - baseSize) * eased;
+        if (graphRef.current?.hasNode(pulseId)) {
+          graphRef.current.mergeNodeAttributes(pulseId, {
+            size,
+            color: `rgba(15, 23, 42, ${alpha.toFixed(3)})`,
+          });
+        }
+        rendererRef.current?.refresh();
+        if (t < 1) {
+          pulseFramesRef.current.set(pulseId, requestAnimationFrame(step));
+        } else {
+          pulseFramesRef.current.delete(pulseId);
+          if (graphRef.current?.hasNode(pulseId)) graphRef.current.dropNode(pulseId);
+          rendererRef.current?.refresh();
+        }
+      };
+      pulseFramesRef.current.set(pulseId, requestAnimationFrame(step));
+    };
+
     const addOrUpdateNode = (node: GraphNode) => {
       const position = positions.get(node.id) ?? { id: node.id, x: 0, y: 0, depth: 0, angle: 0 };
       const baseAttrs = nodeAttributes(node, position, activeNodeId, highlightedNodes, viewMode, visibleNodes.length);
+      // Force labels for every node in the focal set so the user can read
+      // the names of all connected entities at a glance once they've
+      // selected a node. Also set a slightly stronger label colour so the
+      // neighbourhood pops over the dimmed background.
+      const inFocalSet = focalSet?.has(node.id) ?? false;
+      const focalLabelOverride = focalSet && inFocalSet && node.id !== activeNodeId
+        ? { forceLabel: true, labelColor: { color: '#0f172a' } }
+        : null;
       const attrs: SigmaNodeAttributes = focalSet
-        ? { ...baseAttrs, color: applyFocalDim(baseAttrs.color, focalSet, node.id) }
+        ? { ...baseAttrs, ...(focalLabelOverride ?? {}), color: applyFocalDim(baseAttrs.color, focalSet, node.id) }
         : baseAttrs;
       const firstSeenAt = firstSeenAtRef.current.get(node.id);
       const isSticky = firstSeenAt !== undefined && performance.now() - firstSeenAt > STICKY_NODE_AFTER_MS && centerId === previousCenterIdRef.current;
@@ -1584,6 +1741,10 @@ export function SigmaGraphView({
         if (shouldAnimatePositions) {
           nodeTweens.push({ id: node.id, fromX: startX, fromY: startY, toX: attrs.x, toY: attrs.y });
         }
+        // Brief halo pulse on first paint so a node arriving via SSE reads
+        // as "something appeared" rather than just popping in. The pulse
+        // self-removes after 600ms and is skipped in overview mode.
+        spawnFirstPaintPulse(node, { x: attrs.x, y: attrs.y });
       } else {
         const current = graph.getNodeAttributes(node.id) as Partial<SigmaNodeAttributes>;
         const fromX = typeof current.x === 'number' ? current.x : attrs.x;
@@ -1597,6 +1758,45 @@ export function SigmaGraphView({
       }
     };
 
+    const spawnEdgeDrawOn = (edgeId: string, targetSize: number, targetColor: string) => {
+      // Lightweight "draw-on" tween: grow edge size 0 → target and fade
+      // alpha 0 → 1 over 360ms. Not a true stroke-dasharray reveal (Sigma's
+      // default edge programs don't expose progress), but reads as the
+      // edge appearing rather than popping.
+      if (viewMode !== 'focused') return;
+      if (!graphRef.current?.hasEdge(edgeId)) return;
+      const start = performance.now();
+      const duration = 360;
+      // Initialise at zero state so the first frame doesn't flash full-size.
+      graphRef.current.mergeEdgeAttributes(edgeId, {
+        size: 0.01,
+        color: colorWithAlpha(targetColor, 0),
+      });
+      const tick = (now: number) => {
+        const t = Math.min(1, (now - start) / duration);
+        const eased = easeOutCubic(t);
+        if (graphRef.current?.hasEdge(edgeId)) {
+          graphRef.current.mergeEdgeAttributes(edgeId, {
+            size: Math.max(0.01, targetSize * eased),
+            color: colorWithAlpha(targetColor, eased),
+          });
+        }
+        rendererRef.current?.refresh();
+        if (t < 1) {
+          edgeDrawFramesRef.current.set(edgeId, requestAnimationFrame(tick));
+        } else {
+          edgeDrawFramesRef.current.delete(edgeId);
+          // Restore final attrs so the dim/highlight tween paths can take
+          // over cleanly without the easing residue.
+          if (graphRef.current?.hasEdge(edgeId)) {
+            graphRef.current.mergeEdgeAttributes(edgeId, { size: targetSize, color: targetColor });
+            rendererRef.current?.refresh();
+          }
+        }
+      };
+      edgeDrawFramesRef.current.set(edgeId, requestAnimationFrame(tick));
+    };
+
     const addOrUpdateEdge = (edge: GraphEdge, index: number) => {
       const id = edgeKey(edge, index);
       if (!nodeIds.has(edge.source) || !nodeIds.has(edge.target) || edge.source === edge.target) return;
@@ -1605,8 +1805,10 @@ export function SigmaGraphView({
       const attrs: SigmaEdgeAttributes = focalSet
         ? { ...baseEdgeAttrs, color: applyFocalDimEdge(baseEdgeAttrs.color, focalSet, edge.source, edge.target) }
         : baseEdgeAttrs;
-      if (!graph.hasEdge(id)) {
+      const isNewEdgeInGraph = !graph.hasEdge(id);
+      if (isNewEdgeInGraph) {
         graph.addEdgeWithKey(id, edge.source, edge.target, attrs);
+        spawnEdgeDrawOn(id, attrs.size ?? 1, attrs.color);
       } else {
         graph.replaceEdgeAttributes(id, attrs);
       }
@@ -1670,24 +1872,140 @@ export function SigmaGraphView({
       rendererRef.current.refresh();
     }
 
+    // Smooth dim transition: tween non-focal node/edge alpha for 200ms when
+    // the focal set changes (selection made, cleared, or moved to another
+    // node). The render path above already applied the target dim; this
+    // rAF overrides for the transition window.
+    {
+      const prev = prevFocalSetRef.current;
+      const curr = focalSet;
+      const sameSet = prev === curr || (
+        prev !== null && curr !== null && prev.size === curr.size && [...prev].every(id => curr.has(id))
+      );
+      if (!sameSet) {
+        if (dimAnimRafRef.current !== null) cancelAnimationFrame(dimAnimRafRef.current);
+        const NODE_DIM_ALPHA = 0.22;
+        const EDGE_DIM_ALPHA = 0.18;
+        type DimEntry = { id: string; from: number; to: number; base: string };
+        const nodeEntries: DimEntry[] = [];
+        for (const node of visibleNodes) {
+          const wasFocal = prev === null || prev.has(node.id);
+          const isFocal = curr === null || curr.has(node.id);
+          if (wasFocal === isFocal) continue;
+          const baseColor = nodeAttributes(
+            node,
+            positions.get(node.id) ?? { id: node.id, x: 0, y: 0, depth: 0, angle: 0 },
+            activeNodeId,
+            highlightedNodes,
+            viewMode,
+            visibleNodes.length,
+          ).color;
+          nodeEntries.push({
+            id: node.id,
+            from: wasFocal ? 1 : NODE_DIM_ALPHA,
+            to: isFocal ? 1 : NODE_DIM_ALPHA,
+            base: baseColor,
+          });
+        }
+        const edgeEntries: DimEntry[] = [];
+        renderableEdges.forEach((edge, index) => {
+          const id = edgeKey(edge, index);
+          const wasFocal = prev === null || (prev.has(edge.source) && prev.has(edge.target));
+          const isFocal = curr === null || (curr.has(edge.source) && curr.has(edge.target));
+          if (wasFocal === isFocal) return;
+          const baseColor = edgeAttributes(edge, activeNodeId, viewMode).color;
+          edgeEntries.push({
+            id,
+            from: wasFocal ? 1 : EDGE_DIM_ALPHA,
+            to: isFocal ? 1 : EDGE_DIM_ALPHA,
+            base: baseColor,
+          });
+        });
+        if (nodeEntries.length > 0 || edgeEntries.length > 0) {
+          const dimStart = performance.now();
+          const dimDuration = 200;
+          const dimTick = (now: number) => {
+            const t = Math.min(1, (now - dimStart) / dimDuration);
+            const eased = easeOutCubic(t);
+            for (const e of nodeEntries) {
+              if (!graph.hasNode(e.id)) continue;
+              const alpha = e.from + (e.to - e.from) * eased;
+              graph.mergeNodeAttributes(e.id, { color: colorWithAlpha(e.base, alpha) });
+            }
+            for (const e of edgeEntries) {
+              if (!graph.hasEdge(e.id)) continue;
+              const alpha = e.from + (e.to - e.from) * eased;
+              graph.mergeEdgeAttributes(e.id, { color: colorWithAlpha(e.base, alpha) });
+            }
+            rendererRef.current?.refresh();
+            if (t < 1) {
+              dimAnimRafRef.current = requestAnimationFrame(dimTick);
+            } else {
+              dimAnimRafRef.current = null;
+            }
+          };
+          dimAnimRafRef.current = requestAnimationFrame(dimTick);
+        }
+      }
+      prevFocalSetRef.current = focalSet ? new Set(focalSet) : null;
+    }
+
     const wasEmpty = previousNodeCountRef.current === 0;
     const centerChanged = previousCenterIdRef.current !== centerId;
+    const activeChanged = previousActiveIdRef.current !== activeNodeId;
+    const nodeCountChanged = previousNodeCountRef.current !== visibleNodes.length;
     previousNodeCountRef.current = visibleNodes.length;
     previousCenterIdRef.current = centerId;
+    previousActiveIdRef.current = activeNodeId;
 
-    if ((wasEmpty && visibleNodes.length > 0) || centerChanged) {
-      void rendererRef.current.getCamera().animatedReset({ duration: wasEmpty ? 420 : 260 });
+    // Fly-to target: prefer the user-selected active node so clicking a
+    // deep entity actually flies the camera to it. Falls back to centerId
+    // for the first-paint case (when no active node has been picked yet).
+    const flyToId = activeChanged && activeNodeId
+      ? activeNodeId
+      : (centerChanged && centerId ? centerId : null);
+    if (wasEmpty && visibleNodes.length > 0) {
+      void rendererRef.current.getCamera().animatedReset({ duration: 420 });
+    } else if (flyToId) {
+      // Camera fly-to: focus on the new active/centre node + its immediate
+      // neighbours instead of resetting to full-graph bounds. Reads target
+      // positions from the layout `positions` map (not the Sigma graph
+      // attrs) so the fit target is the post-tween bbox. The 1200ms
+      // auto-fit timer below still re-frames everything once the stream
+      // settles, so growth-time framing is unaffected.
+      const focusIds = new Set<string>([flyToId]);
+      for (const edge of renderableEdges) {
+        if (edge.source === flyToId) focusIds.add(edge.target);
+        else if (edge.target === flyToId) focusIds.add(edge.source);
+      }
+      const points = [...focusIds]
+        .map(id => positions.get(id))
+        .filter((p): p is { x: number; y: number; id: string; depth: number; angle: number } => Boolean(p));
+      if (points.length > 0) {
+        const minX = Math.min(...points.map(p => p.x));
+        const maxX = Math.max(...points.map(p => p.x));
+        const minY = Math.min(...points.map(p => p.y));
+        const maxY = Math.max(...points.map(p => p.y));
+        const span = Math.max(maxX - minX, maxY - minY, 1);
+        const ratio = Math.max(0.32, Math.min(2.4, span / 8));
+        void rendererRef.current.getCamera().animate(
+          { x: (minX + maxX) / 2, y: (minY + maxY) / 2, ratio },
+          { duration: 520, easing: 'cubicInOut' },
+        );
+      }
     }
 
     // Auto-fit while the graph is still growing: schedule a reset ~1200ms
     // after the last node-count change. Cancelled by the next change, so it
     // only fires after the stream goes quiet — matches "extraction settled,
-    // re-frame everything in view."
-    if (autoFitTimerRef.current) {
+    // re-frame everything in view." Only re-schedule when the node count
+    // actually changed; otherwise selection-only re-renders would keep
+    // bumping the timer and eventually override the fly-to.
+    if (nodeCountChanged && autoFitTimerRef.current) {
       clearTimeout(autoFitTimerRef.current);
       autoFitTimerRef.current = null;
     }
-    if (visibleNodes.length > 0) {
+    if (nodeCountChanged && visibleNodes.length > 0) {
       autoFitTimerRef.current = setTimeout(() => {
         autoFitTimerRef.current = null;
         rendererRef.current?.getCamera().animatedReset({ duration: 380 });
@@ -1707,6 +2025,18 @@ export function SigmaGraphView({
         clearTimeout(autoFitTimerRef.current);
         autoFitTimerRef.current = null;
       }
+      pulseFramesRef.current.forEach(frame => cancelAnimationFrame(frame));
+      pulseFramesRef.current.clear();
+      if (breathingFrameRef.current !== null) {
+        cancelAnimationFrame(breathingFrameRef.current);
+        breathingFrameRef.current = null;
+      }
+      if (dimAnimRafRef.current !== null) {
+        cancelAnimationFrame(dimAnimRafRef.current);
+        dimAnimRafRef.current = null;
+      }
+      edgeDrawFramesRef.current.forEach(frame => cancelAnimationFrame(frame));
+      edgeDrawFramesRef.current.clear();
       rendererRef.current?.kill();
       rendererRef.current = null;
       graphRef.current = null;

@@ -5,6 +5,7 @@ import { describeNode } from '@/lib/api';
 export interface NodeRelationship {
   direction: 'out' | 'in';
   predicate: string;
+  otherId?: string;
   otherLabel: string;
   sources?: Array<{ title?: string; url?: string; snippet?: string }>;
 }

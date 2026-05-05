@@ -42,15 +42,15 @@ Three mechanisms make it scale: (a) hierarchical predicates become real tree edg
 ### Phase 2 — Adaptive sub-categorization  ✓ (2026-05-04)
 
 - [x] New orchestrator agent `apps/orchestrator/src/agents/subCategorizer.ts` (Claude Haiku via `supervisorModel`), with stub-mode + on-failure heuristic fallback that groups by entity type
-- [x] `splitOversizedSubtrees(runId, presentationTriples)` in `presentation.ts` — walks every `contains` parent, calls `subCategorize` for any with > 18 children, replaces original edges with `parent → contains → subcategory` + `subcategory → contains → child` at confidence 0.93/0.92 so the frontend dedupe-by-target prefers the deeper route
-- [x] Recursion up to `SUBCATEGORY_MAX_DEPTH = 3` so subcategories that themselves grow large get split again
+- [x] `splitOversizedSubtrees(runId, presentationTriples)` in `presentation.ts` — walks every `contains` parent, calls `subCategorize` for any with > THRESHOLD children, replaces original edges with `parent → contains → subcategory` + `subcategory → contains → child` at confidence 0.93/0.92 so the frontend dedupe-by-target prefers the deeper route
+- [x] Aggressive splitting (2026-05-05): `SUBCATEGORY_FANOUT_THRESHOLD` lowered 18 → 7 so users navigate via real hierarchy ("Finance → Revenue → Q3 Report") instead of clicking buckets. Removed fixed `SUBCATEGORY_MAX_DEPTH` — recursion stops naturally when no parent exceeds threshold. Replaced with `SUBCATEGORY_MAX_PASSES = 32` + `SUBCATEGORY_MAX_CALLS_PER_RUN = 128` budget so pathological datasets can't burn unbounded API spend.
 - [x] Wired into `apps/orchestrator/src/index.ts` final pass only — incremental SSE keeps the cheap flat scaffold; subcategory layer arrives at run completion
 - [x] Subcategory triples carry `subcategoryRoute: true` so the orchestrator's per-entity contains lock allows them to override earlier `category → contains → entity` edges
 - [x] Frontend recognises subcategory nodes (`presentationRole: 'subcategory'`) — `isSubcategoryNode`, structural styling (slate-550 between category and bucket shades), reveal-mode treatment, and `isStructuralNode` includes them so edge scoring stays sensible
 
 ### Phase 3 — Progressive disclosure  ✓ (2026-05-04)
 
-- [x] `MAX_PARENT_FANOUT = 12` cap on rendered children per parent at every depth
+- [x] `MAX_PARENT_FANOUT` cap on rendered children per parent at every depth (currently 20, raised from 12 → 8 → 20 on 2026-05-05). Bucket is now a *last-resort* safety valve; the orchestrator's sub-categoriser is the primary tool for keeping trees readable, so most graphs should never hit this threshold.
 - [x] `bucketOversizedFanouts(nodes, edges, expandedBucketIds)` — for each parent (any node that's a `contains` source) with > 12 children, keep the top 11 by importance × degree and fold the rest into a single `bucket:<parentId>:more` node. Descendants of bucketed children are also hidden (they re-appear once the bucket is expanded)
 - [x] `expandedBucketIds: Set<string>` state in SigmaGraphView — clicking an overflow bucket toggles its parent's expansion in place; other buckets stay collapsed independently
 - [x] `clickNode` handler distinguishes `:more` overflow buckets (toggle expand) from legacy semantic center buckets (show member list panel — old behavior preserved)
@@ -58,17 +58,46 @@ Three mechanisms make it scale: (a) hierarchical predicates become real tree edg
 - [x] Render effect dependency array includes `expandedBucketIds` so toggling triggers a re-layout / Sigma rebuild
 - [x] Underlying graph data unchanged — bucketing is purely a render-time transform; expanding a bucket re-injects the original children into the visible set
 
-### Phase 4 — Document clusters (optional, later)
-
-- [ ] Re-introduce documents as a layer, but only when there are > 5 docs in the same subcategory
-- [ ] AI clusters related docs by topic: `Q1-Q4 2025 Revenue Reports` instead of 4 separate nodes
-- [ ] Documents become an optional intermediate layer between subcategory and entity, only when useful
-- [ ] Cluster node click expands to individual document nodes
-- [ ] Document nodes still don't appear when there are < 5 docs (current behavior preserved for small uploads)
-
 ### Why this order
 
-Phase 1 is small but immediately turns the graph from "always 3 levels" to "as deep as your data is". Phase 2 makes it scale-ready without UI changes. Phase 3 is the unlock for actual 10K-node graphs. Phase 4 is a nice-to-have once the rest is stable.
+Phase 1 is small but immediately turns the graph from "always 3 levels" to "as deep as your data is". Phase 2 makes it scale-ready without UI changes. Phase 3 is the unlock for actual 10K-node graphs.
+
+Documents are **not** a layer in the tree — the orchestrator only emits `main → category → entity`. Source filenames are surfaced via `SidePanel`'s Documents list, derived from edge `sources[].title` metadata (see `DocumentList` in `SidePanel.tsx`).
+
+## Persistence & Multi-Graph Sessions (queued — 2026-05-04)
+
+Today every page load is a fresh run — closing the browser loses the graph. Real users will want to come back to a graph they spent 30 minutes building, and most users will work on more than one at a time (one per company / project / dataset). Needs a saving mechanism plus a session picker.
+
+Open product questions to settle first:
+
+- **Storage**: cloud (Supabase, persists across devices, requires auth) vs local (IndexedDB, stays on the device, no auth needed)? Cloud is the right answer long-term but adds an auth flow. Could ship local-only first, layer cloud later when auth lands.
+- **Identity**: do users sign in (email, Google, magic link) or is everything keyed by a generated browser id? Generated id keeps onboarding zero-friction but breaks across devices.
+- **What's a "graph session"**: one run? A project that contains many runs? E.g. uploading more documents into the same graph (we already support append) — does that stay one session or fork? Most users will think "this is my Acme analysis" regardless of how many runs they did inside it.
+
+Tasks:
+
+- [ ] Pick a storage backend + identity model (decision needed before implementation)
+- [ ] Schema for a graph session: `{ id, name, createdAt, updatedAt, mainEntity, runIds: string[], thumbnail? }`
+- [ ] Backend endpoints: `GET /sessions`, `POST /sessions`, `GET /sessions/:id`, `PATCH /sessions/:id`, `DELETE /sessions/:id`
+- [ ] Auto-save on every meaningful state change (new run, new upload, expansion, edit) — debounced
+- [ ] Landing screen redesign: when the user has saved sessions, show a picker — `New Graph` button + grid/list of existing sessions with name, last-edited time, node count, main-entity badge. When the user has none, show the current empty state.
+- [ ] Session naming: auto-name from the main entity ("Acme Corp"), let the user rename inline
+- [ ] Session thumbnail: snapshot the Sigma canvas as a small preview after each significant change
+- [ ] Open-session flow: clicking a session loads its graph data, restores `runId`, reattaches SSE if any run is still active, repositions camera to last view
+- [ ] Delete-session confirmation, optional export-to-JSON before delete
+- [ ] URL routing: `/g/:sessionId` so users can bookmark + share (sharing requires auth + permissions story — can defer)
+
+## Animation Polish (queued — 2026-05-04)
+
+Most of the canvas feels static today; the only motion comes from `animDelay` fade-in during SSE and camera `animatedReset` on settle. Adding deliberate motion makes the surface feel alive without being toy-ish. Ordered by impact / cost ratio.
+
+- [x] **Edge draw-on grow-in** (2026-05-05, lightweight variant) — `spawnEdgeDrawOn` in `SigmaGraphView.tsx` rAF-tweens new edges from `size: 0, alpha: 0` → `size: target, alpha: 1` over 360ms (eased cubic), then restores final attrs cleanly so the dim/highlight tween paths can take over. Skipped in overview mode. Frames tracked in `edgeDrawFramesRef`. NOTE: not a true stroke-dasharray draw-along-the-line — Sigma's default edge programs don't expose a progress attribute, so a faithful version would need a custom WebGL edge renderer (a half-day spike). The grow-in still reads as "appearing" rather than popping; revisit if the size+alpha grow doesn't feel right in user testing.
+- [x] **Sequential subtree reveal on expansion** (2026-05-05) — `useGraphSSE.ts` now stamps each new expansion node with `data.animDelay = expansionIdx * 90ms` (where `expansionIdx` is taken from `expansionNewNodesRef.size` *before* the add, so the first child is delay 0). Bridge edges and real expansion edges inherit `targetDelay + 0.18s` so each edge draws in just after its endpoint nodes have faded in. Same logic applied to query-mode commits. The Sigma render path already honours `animDelay` for new nodes/edges via `animDelayMs`.
+- [x] **Camera fly-to on selection** (2026-05-05) — clicking a node now animates the camera to the active node + its immediate neighbours instead of `animatedReset`-ing to the full-graph bounds (`SigmaGraphView.tsx`, ~line 1685). Bbox is computed from the layout `positions` map so the fit target is the post-tween cluster, not the pre-tween one. The 1200ms streaming auto-fit timer was guarded with `nodeCountChanged` so selection-only re-renders no longer bump the timer and override the fly-to.
+- [x] **Halo pulse on first-paint** (2026-05-05) — when a node is added to the Sigma graph for the first time, `spawnFirstPaintPulse` adds a transient `sigma-halo:pulse:<nodeId>` halo node, rAF-tweens its size from 1.7× → 1× and alpha from 0.32 → 0 over 600ms (easeOutCubic), then drops the node. Frames tracked in `pulseFramesRef` and cancelled on unmount; the prune loop skips pulse halo IDs so a re-render fired mid-pulse doesn't yank them. Skipped in overview mode.
+- [x] **Smooth dim transitions** (2026-05-05) — `SigmaGraphView.tsx` render effect now snapshots `prevFocalSetRef` vs new `focalSet`, computes per-node and per-edge {from, to} alpha pairs (1.0 vs 0.22 for nodes, 1.0 vs 0.18 for edges), and rAF-tweens each affected element's color via `colorWithAlpha` over 200ms (eased cubic). Only entries whose focal membership changed are animated, so an inter-set move only animates the boundary diff. Cancels and restarts on rapid selection changes; cleaned up on unmount.
+- [x] **Subcategory unfold animation** (2026-05-05) — already covered by the existing layout-position tween in `SigmaGraphView.tsx` (~line 1737): when subcategory triples arrive late and the layout recomputes, every existing child whose `(x, y)` changed gets pushed into `nodeTweens` and rAF-interpolated from old → new position over 260-680ms (eased cubic). When the new subcategory nodes themselves stream in, sequential subtree reveal (above) staggers their fade-in. No new machinery required — flagged as confirmed working via the position-tween path rather than as a separate feature.
+- [x] **Loading state breathing on the centre node** (2026-05-05) — added `isStreaming` prop on `SigmaGraphView` (driven by canvas `isProcessing`). While true, an rAF loop sine-modulates the focal halo size (±2.5px, 2.4s period). Targets `activeHaloId` when the user has clicked into a deeper node, otherwise the centre `haloId`. Both halo update functions write `activeHaloIdRef` + `activeHaloBaseSizeRef` so the breathing offset survives re-renders without snapping. On `isStreaming` flip-to-false, the offset is decayed to 0 over 320ms before stopping. (Sigma is canvas-based, so the existing `node-breathe` CSS keyframe couldn't be used directly.)
 
 ## UX Redesign — Graph Canvas (next up)
 
@@ -87,6 +116,7 @@ Already shipped from this redesign cycle:
 - [x] loading indicator persists until handleDataSubmit / handleUploadDocuments's await chain settles (the per-file MetaAgent `completed` event was firing too early in multi-file uploads)
 - [x] labels: depth ≤ 1 forced when totalNodes ≤ 200; deeper nodes defer to Sigma's `labelDensity` collision avoidance; `LABEL_MAX_CHARS=24` truncation
 - [x] QueryBox compact (no chips by default; chips reveal on input focus or scoped answer)
+- [x] Selected-node integration into the left Contents panel (2026-05-05): clicking a node opens `SidePanel` (left) with a Selected-Node view showing label, type, and clickable relationships (each `NodeRelationship` now carries `otherId` so the user can hop to any neighbour). The floating `NodeInputBox` popup is suppressed while the panel is open to avoid two surfaces showing the same thing. Canvas-click clears the focal halo / dim and active-node state but **keeps the panel open** if it was open (closing it would feel like a second, unrequested action). `DocumentList` now derives its rows from edge `sources[].title` when no document graph nodes exist, so source filenames are still surfaced even though documents are no longer a graph layer.
 
 ### Known backend bugs (not part of UI redesign — fix later)
 
