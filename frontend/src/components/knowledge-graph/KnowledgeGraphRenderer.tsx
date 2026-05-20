@@ -1,5 +1,9 @@
-import { SigmaGraphView } from './SigmaGraphView';
+import { lazy, Suspense, useState, useEffect } from 'react';
 import type { GraphEdge, GraphNode } from './graphTypes';
+
+const SigmaGraphView = lazy(() =>
+  import('./SigmaGraphView').then((m) => ({ default: m.SigmaGraphView }))
+);
 
 interface KnowledgeGraphRendererProps {
   nodes: GraphNode[];
@@ -24,17 +28,24 @@ export function KnowledgeGraphRenderer({
   onSigmaFocusNodes,
   onPaneClick,
 }: KnowledgeGraphRendererProps) {
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+
+  if (!mounted) return <div className="w-full h-full" />;
+
   return (
-    <SigmaGraphView
-      nodes={nodes}
-      edges={edges}
-      activeNodeId={activeNodeId}
-      highlightedNodes={highlightedNodes}
-      viewMode={sigmaViewMode}
-      isStreaming={isStreaming}
-      onNodeClick={onSigmaNodeClick}
-      onFocusNodes={onSigmaFocusNodes}
-      onPaneClick={onPaneClick}
-    />
+    <Suspense fallback={<div className="w-full h-full" />}>
+      <SigmaGraphView
+        nodes={nodes}
+        edges={edges}
+        activeNodeId={activeNodeId}
+        highlightedNodes={highlightedNodes}
+        viewMode={sigmaViewMode}
+        isStreaming={isStreaming}
+        onNodeClick={onSigmaNodeClick}
+        onFocusNodes={onSigmaFocusNodes}
+        onPaneClick={onPaneClick}
+      />
+    </Suspense>
   );
 }

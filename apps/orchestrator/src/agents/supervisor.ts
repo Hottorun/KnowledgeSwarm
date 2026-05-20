@@ -26,7 +26,8 @@ export async function runSupervisor(
   branch: BranchPlan,
   chunks: DocumentChunk[],
   specialist: SpecialistProfile,
-  documentName: string
+  documentName: string,
+  rootTopic?: string,
 ): Promise<Triple[]> {
   const specialistName = specialistDisplayName(specialist, branch);
   const supervisorName = `Supervisor:${specialistName}`;
@@ -44,7 +45,7 @@ export async function runSupervisor(
       const workerName = `${specialistName}:Chunk${chunk.index}`;
       await emitAgentEvent(runId, workerName, 'extracting', `Chunk ${chunk.index} (${chunk.text.length} chars)`);
       try {
-        const output = await runWorker(chunk, branch.nodeTypes, specialist, branch, documentName);
+        const output = await runWorker(chunk, branch.nodeTypes, specialist, branch, documentName, rootTopic);
         await emitAgentEvent(runId, workerName, 'done', `${output.triples.length} triple(s) from chunk ${chunk.index}`);
         return output.triples;
       } catch (error) {

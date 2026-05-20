@@ -12,9 +12,13 @@ interface TopNavProps {
   filterActive: boolean;
   onUploadDocuments: (files: File[]) => void;
   graphLoaded: boolean;
+  currentProject?: { id: string; name: string } | null;
+  projectDocumentCount?: number;
+  onGenerateMap?: () => void;
+  isGenerating?: boolean;
 }
 
-export function TopNav({ onSearchOpen, onFilterOpen, filterActive, onUploadDocuments, graphLoaded }: TopNavProps) {
+export function TopNav({ onSearchOpen, onFilterOpen, filterActive, onUploadDocuments, graphLoaded, currentProject, projectDocumentCount = 0, onGenerateMap, isGenerating }: TopNavProps) {
   const [showProfile, setShowProfile] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
 
@@ -44,6 +48,45 @@ export function TopNav({ onSearchOpen, onFilterOpen, filterActive, onUploadDocum
           Mapify
         </span>
       </div>
+
+      {/* Project badge — center, always visible when a project is active */}
+      <AnimatePresence>
+        {currentProject && (
+          <motion.div
+            initial={{ opacity: 0, y: -6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -6 }}
+            transition={{ duration: 0.2 }}
+            className="absolute left-1/2 -translate-x-1/2 flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs"
+            style={{
+              background: 'var(--secondary)',
+              border: '1px solid var(--border)',
+              color: 'var(--foreground)',
+            }}
+          >
+            <span className="opacity-50">Project</span>
+            <span className="font-semibold max-w-[160px] truncate">{currentProject.name}</span>
+            {projectDocumentCount > 0 && (
+              <span
+                className="px-1.5 py-0.5 rounded-md text-[10px] font-medium"
+                style={{ background: 'var(--muted)', color: 'var(--muted-foreground)' }}
+              >
+                {projectDocumentCount} doc{projectDocumentCount !== 1 ? 's' : ''}
+              </span>
+            )}
+            {projectDocumentCount > 0 && onGenerateMap && (
+              <button
+                onClick={onGenerateMap}
+                disabled={isGenerating}
+                className="px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-opacity disabled:opacity-40"
+                style={{ background: 'var(--primary)', color: 'var(--primary-foreground)' }}
+              >
+                {isGenerating ? '…' : 'Generate Map'}
+              </button>
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Search + Upload + Profile */}
       <div className="flex items-center gap-2">

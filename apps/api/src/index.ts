@@ -9,6 +9,7 @@ import demoRouter from './routes/demo';
 import downloadsRouter from './routes/downloads';
 import mcpRouter from './routes/mcp';
 import aiRouter from './routes/ai';
+import projectsRouter from './routes/projects';
 
 const app = express();
 
@@ -47,6 +48,7 @@ app.use('/demo', demoRouter);
 app.use('/downloads', downloadsRouter);
 app.use('/mcp', mcpRouter);
 app.use('/ai', aiRouter);
+app.use('/projects', projectsRouter);
 
 app.use((_req, res) => {
   res.status(404).json({ error: 'Not found' });

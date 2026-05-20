@@ -424,7 +424,7 @@ export function useGraphSSE(opts: UseGraphSSEOptions) {
         confidence: backendEdge.confidence,
         sources: backendEdge.sources ?? [],
         sourceLabel: formatSourceLabel(backendEdge.sources ?? []),
-        properties: backendEdge.properties ?? {},
+        properties: { ...(backendEdge.properties ?? {}), ...(anchor ? { expansion: true } : {}) },
         ...(inheritedAnimDelay !== undefined ? { animDelay: inheritedAnimDelay } : {}),
       };
 

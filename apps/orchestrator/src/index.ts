@@ -26,6 +26,7 @@ export async function orchestrate(
   documentText: string,
   documentName = 'input',
   callbacks?: OrchestratorCallbacks,
+  rootTopic?: string,
 ): Promise<void> {
   if (callbacks) {
     setEmitCallbacks(callbacks);
@@ -43,6 +44,9 @@ export async function orchestrate(
     );
   }
 
+  if (rootTopic) {
+    await emitAgentEvent(runId, 'MetaAgent', 'focus', `Focusing extraction on: "${rootTopic}"`);
+  }
   await emitAgentEvent(runId, 'MetaAgent', 'chunking', `Splitting ${documentName} into chunks`);
 
   let chunks = chunkText(effectiveDocumentText);
@@ -64,7 +68,7 @@ export async function orchestrate(
   const [{ documentType, branches }, classification] = await Promise.all([
     (async () => {
       await emitAgentEvent(runId, 'MetaAgent', 'decomposing', 'Analyzing document structure');
-      return decomposeDocument(summary);
+      return decomposeDocument(summary, rootTopic);
     })(),
     classifyDocument(runId, documentName, summary),
   ]);
@@ -152,7 +156,7 @@ export async function orchestrate(
   type BranchTask = Promise<{ result: BranchResult; task: BranchTask }>;
 
   const branchPromises: BranchTask[] = branchesToRun.map((branch, i) => {
-    const work: Promise<BranchResult> = runSupervisor(runId, branch, branchChunks[i], specialists[i], documentName)
+    const work: Promise<BranchResult> = runSupervisor(runId, branch, branchChunks[i], specialists[i], documentName, rootTopic)
       .then(triples => ({ status: 'fulfilled' as const, value: triples, branch, i }))
       .catch(error => ({ status: 'rejected' as const, reason: error, branch, i }));
 
@@ -324,6 +328,7 @@ async function main() {
   const cliRunId = flags['run-id'];
   const useStdin = flags['stdin'] === 'true';
   const documentName = flags['document-name'] || 'input';
+  const rootTopic = flags['root-topic'] || undefined;
 
   let documentText: string;
 
@@ -358,7 +363,7 @@ async function main() {
     console.log(`[api] created run: ${runId}`);
   }
 
-  await orchestrate(runId, documentText, documentName);
+  await orchestrate(runId, documentText, documentName, undefined, rootTopic);
 }
 
 function limitDocumentText(text: string): string {

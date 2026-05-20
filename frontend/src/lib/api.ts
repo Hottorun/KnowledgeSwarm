@@ -2,6 +2,117 @@ const API_BASE = (import.meta.env as Record<string, string>).VITE_API_BASE_URL ?
 
 export { API_BASE };
 
+export interface Project {
+  id: string;
+  name: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProjectDocument {
+  id: string;
+  project_id: string;
+  name: string;
+  mime_type: string | null;
+  char_count: number;
+  created_at: string;
+}
+
+export interface ProjectMap {
+  id: string;
+  project_id: string;
+  run_id: string | null;
+  name: string;
+  prompt: string | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProjectWithDetails extends Project {
+  documents: ProjectDocument[];
+  maps: ProjectMap[];
+}
+
+export async function createProject(name: string): Promise<Project> {
+  const res = await fetch(`${API_BASE}/projects`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) {
+    const data = await res.json() as { error?: string };
+    throw new Error(data.error ?? 'Failed to create project');
+  }
+  return res.json() as Promise<Project>;
+}
+
+export async function listProjects(): Promise<Project[]> {
+  const res = await fetch(`${API_BASE}/projects`);
+  if (!res.ok) return [];
+  return res.json() as Promise<Project[]>;
+}
+
+export async function getProject(projectId: string): Promise<ProjectWithDetails> {
+  const res = await fetch(`${API_BASE}/projects/${projectId}`);
+  if (!res.ok) {
+    const data = await res.json() as { error?: string };
+    throw new Error(data.error ?? 'Failed to fetch project');
+  }
+  return res.json() as Promise<ProjectWithDetails>;
+}
+
+export async function uploadDocument(
+  projectId: string,
+  name: string,
+  mimeType: string,
+  rawText: string,
+): Promise<ProjectDocument> {
+  const res = await fetch(`${API_BASE}/projects/${projectId}/documents`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, mimeType, rawText }),
+  });
+  if (!res.ok) {
+    const data = await res.json() as { error?: string };
+    throw new Error(data.error ?? 'Failed to save document');
+  }
+  return res.json() as Promise<ProjectDocument>;
+}
+
+export async function deleteDocument(projectId: string, docId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/projects/${projectId}/documents/${docId}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    const data = await res.json() as { error?: string };
+    throw new Error(data.error ?? 'Failed to delete document');
+  }
+}
+
+export async function generateMap(
+  projectId: string,
+  prompt: string,
+  documentIds?: string[],
+): Promise<{ mapId: string; runId: string }> {
+  const res = await fetch(`${API_BASE}/projects/${projectId}/maps`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt, documentIds }),
+  });
+  if (!res.ok) {
+    const data = await res.json() as { error?: string };
+    throw new Error(data.error ?? 'Failed to generate map');
+  }
+  return res.json() as Promise<{ mapId: string; runId: string }>;
+}
+
+export async function listMaps(projectId: string): Promise<ProjectMap[]> {
+  const res = await fetch(`${API_BASE}/projects/${projectId}/maps`);
+  if (!res.ok) return [];
+  return res.json() as Promise<ProjectMap[]>;
+}
+
 export async function checkAIStatus(): Promise<boolean> {
   try {
     const res = await fetch(`${API_BASE}/ai/status`);

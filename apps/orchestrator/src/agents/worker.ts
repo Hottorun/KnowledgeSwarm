@@ -30,14 +30,19 @@ export async function runWorker(
   focusNodeTypes: string[],
   specialist: SpecialistProfile,
   branch: BranchPlan,
-  documentName: string
+  documentName: string,
+  rootTopic?: string,
 ): Promise<WorkerOutput> {
   if (config.stubMode) {
     console.log(`  [${specialist.agentName}] stub - chunk ${chunk.index}`);
     return { triples: withProvenance(STUB_TRIPLES, specialist, branch, chunk.index, documentName) };
   }
 
-  const userMessage = `Specialist: ${specialist.agentName}
+  const focusLine = rootTopic
+    ? `USER FOCUS — prioritize triples relevant to: "${rootTopic}". Skip facts with no connection to this focus.\n`
+    : '';
+
+  const userMessage = `${focusLine}Specialist: ${specialist.agentName}
 Extraction focus: ${specialist.extractionHint}
 Preferred predicates: ${specialist.preferredPredicates.join(', ')}
 Focus entity types: ${[...new Set([...focusNodeTypes, ...specialist.nodeTypes])].join(', ')}

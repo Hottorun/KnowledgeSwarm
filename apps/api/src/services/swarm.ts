@@ -9,7 +9,7 @@ export interface SwarmRunResult {
   stderr: string;
 }
 
-export function runSwarmExtraction(runId: string, text: string, documentName = 'input'): Promise<SwarmRunResult> {
+export function runSwarmExtraction(runId: string, text: string, documentName = 'input', rootTopic?: string): Promise<SwarmRunResult> {
   return new Promise((resolve, reject) => {
     const stubMode = process.env.ORCHESTRATOR_STUB_MODE === 'true';
     if (!stubMode && !process.env.ANTHROPIC_API_KEY) {
@@ -18,7 +18,9 @@ export function runSwarmExtraction(runId: string, text: string, documentName = '
     }
 
     const tsxBin = require('path').join(config.swarmOrchestratorCwd, 'node_modules', '.bin', 'tsx');
-    const child = spawn(tsxBin, ['src/index.ts', '--', '--run-id', runId, '--document-name', documentName, '--stdin'], {
+    const cliArgs = ['src/index.ts', '--', '--run-id', runId, '--document-name', documentName, '--stdin'];
+    if (rootTopic) cliArgs.push('--root-topic', rootTopic);
+    const child = spawn(tsxBin, cliArgs, {
       cwd: config.swarmOrchestratorCwd,
       env: {
         ...process.env,

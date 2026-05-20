@@ -29,17 +29,21 @@ Rules:
 - Base branches on the document's actual content, not generic categories
 - Keep JSON compact`;
 
-export async function decomposeDocument(documentSummary: string): Promise<DecompositionResult> {
+export async function decomposeDocument(documentSummary: string, rootTopic?: string): Promise<DecompositionResult> {
   if (config.stubMode) {
     console.log('[meta] stub decomposition');
     return STUB_DECOMPOSITION;
   }
 
+  const focusInstruction = rootTopic
+    ? `\n\nUSER FOCUS: "${rootTopic}". Design branches that together answer this focus. Prioritize aspects of the document that are most relevant to it.`
+    : '';
+
   const response = await withAnthropicLimit(() => client.messages.create({
     model: config.metaModel,
     max_tokens: 1024,
     system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-    messages: [{ role: 'user', content: `Document excerpt:\n\n${documentSummary}` }],
+    messages: [{ role: 'user', content: `Document excerpt:\n\n${documentSummary}${focusInstruction}` }],
   }));
 
   const text = response.content.find(b => b.type === 'text')?.text ?? '';

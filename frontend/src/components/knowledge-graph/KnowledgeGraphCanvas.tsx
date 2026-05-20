@@ -21,7 +21,8 @@ import {
 } from './presentationGraph';
 import type { AIReasoningStep, DataSource } from './types';
 import type { NodeRelationship } from './NodeInputBox';
-import { createRun, extractFromText, queryGraph as apiQueryGraph, categorizeNodes, nestLevel1Entities, type NodeCategory } from '@/lib/api';
+import { createRun, extractFromText, queryGraph as apiQueryGraph, categorizeNodes, nestLevel1Entities, type NodeCategory, uploadDocument, generateMap, type Project, type ProjectDocument } from '@/lib/api';
+import { ProjectPickerModal } from './ProjectPickerModal';
 import { extractFileText } from '@/lib/pdf';
 import { QueryBox } from './QueryBox';
 import { layout, type GraphLayoutNode } from './layout';
@@ -157,6 +158,9 @@ function KnowledgeGraphCanvasInner() {
   const [reasoningSteps, setReasoningSteps] = useState<AIReasoningStep[]>([]);
   const [runId, setRunId] = useState<string | null>(null);
   const [expandingNodeId, setExpandingNodeId] = useState<string | null>(null);
+  const [currentProject, setCurrentProject] = useState<Project | null>(null);
+  const [projectDocuments, setProjectDocuments] = useState<ProjectDocument[]>([]);
+  const [showProjectPicker, setShowProjectPicker] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [filterOpen, setFilterOpen] = useState(false);
   const [filters, setFilters] = useState<GraphFilters>(() => makeEmptyFilters());
@@ -371,11 +375,20 @@ function KnowledgeGraphCanvasInner() {
     activeNodeIdsRef.current = new Set(nodes.map(node => node.id));
   }, [nodes]);
 
+  // Ref so handleDataSubmit can call handleGenerateMap without ordering issues
+  const handleGenerateMapRef = useRef<(prompt: string, projectOverride?: Project) => Promise<void>>(async () => {});
+
   const handleDataSubmit = useCallback(async (
     text: string,
     documentName = 'input.txt',
     additionalFiles: Array<{ name: string; text: string }> = [],
   ) => {
+    // If project is set, use generateMap with the text as prompt
+    if (currentProject) {
+      await handleGenerateMapRef.current(text || currentProject.name, currentProject);
+      return;
+    }
+
     setIsDissolving(true);
     setIsProcessing(true);
     expansionAnchorRef.current = null;
@@ -468,7 +481,7 @@ function KnowledgeGraphCanvasInner() {
       setIsProcessing(false);
       setIsDissolving(false);
     }
-  }, [connectRunStream, setNodes, setEdges]);
+  }, [connectRunStream, currentProject, projectDocuments.length, setNodes, setEdges]);
 
   // Sort level-1 entities (direct children of the main entity that aren't
   // themselves categories or documents) into the closest existing category.
@@ -636,11 +649,6 @@ function KnowledgeGraphCanvasInner() {
         }
       });
     setSelectedNodeRelationships(rels);
-
-    // Open the Contents sidebar so the Selected-Node tab shows up next to
-    // the floating popup. The sidebar gives a stable, scrollable surface
-    // for long connection lists; the popup stays for quick actions.
-    setLeftPanel(true);
 
     // Pin the popup to the left-middle of the screen so it never overlaps
     // the focused node (which may now be re-positioned anywhere) and never
@@ -810,6 +818,49 @@ function KnowledgeGraphCanvasInner() {
   }, [nodes]);
 
   const handleUploadDocuments = useCallback(async (files: File[]) => {
+    // If a project is set, save documents to DB without processing
+    if (currentProject) {
+      setIsProcessing(true);
+      setReasoningSteps(prev => [...prev, {
+        id: `upload-${Date.now()}`,
+        text: `Saving ${files.length} document${files.length === 1 ? '' : 's'} to project "${currentProject.name}"`,
+        timestamp: new Date(),
+        type: 'analysis',
+      }]);
+
+      for (const file of files) {
+        try {
+          const text = await extractFileText(file);
+          const doc = await uploadDocument(currentProject.id, file.name, file.type || 'text/plain', text);
+          setProjectDocuments(prev => [...prev, doc]);
+          setDataSources(prev => [...prev, {
+            id: `ds-${Date.now()}-${file.name}`,
+            name: file.name,
+            type: 'file',
+            addedAt: new Date(),
+          }]);
+          setReasoningSteps(prev => [...prev, {
+            id: `saved-${Date.now()}-${file.name}`,
+            text: `Saved "${file.name}" to project (${(text.length / 1000).toFixed(1)}k chars)`,
+            timestamp: new Date(),
+            type: 'connection',
+          }]);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : `Failed to save ${file.name}`;
+          console.error(message, error);
+          setReasoningSteps(prev => [...prev, {
+            id: `upload-error-${Date.now()}-${file.name}`,
+            text: `${file.name}: ${message}`,
+            timestamp: new Date(),
+            type: 'analysis',
+          }]);
+        }
+      }
+      setIsProcessing(false);
+      return;
+    }
+
+    // No project — legacy flow: process immediately
     if (!runId) return;
     if (!eventSourceRef.current || eventSourceRef.current.readyState === EventSource.CLOSED) {
       connectRunStream(runId);
@@ -851,7 +902,63 @@ function KnowledgeGraphCanvasInner() {
     }
     appendModeRef.current = false;
     setIsProcessing(false);
-  }, [connectRunStream, runId]);
+  }, [connectRunStream, currentProject, runId]);
+
+  const handleGenerateMap = useCallback(async (prompt: string, projectOverride?: Project) => {
+    const project = projectOverride ?? currentProject;
+    if (!project) return;
+
+    setIsDissolving(true);
+    setIsProcessing(true);
+    expansionAnchorRef.current = null;
+    expansionChildIdxRef.current = 0;
+    eventSourceRef.current?.close();
+    eventSourceRef.current = null;
+    nodePositionRef.current.clear();
+    childCountRef.current.clear();
+    placeholderNodesRef.current.clear();
+    pendingNodesRef.current.clear();
+    pendingEdgesRef.current.clear();
+    nestedRunIdsRef.current.clear();
+    userMovedRef.current.clear();
+    expansionQueueRef.current.length = 0;
+    expansionRunningRef.current = false;
+    setQueuedExpansions(0);
+    historyRef.current = [];
+    redoStackRef.current = [];
+    expansionNewNodesRef.current.clear();
+    setCanUndo(false);
+    setCanRedo(false);
+    setNodes([]);
+    setEdges([]);
+    setReasoningSteps([]);
+    setAiHighlightedNodes(new Set());
+    isSwarmExtraction.current = false;
+
+    try {
+      const { runId: newRunId } = await generateMap(project.id, prompt || project.name);
+      setRunId(newRunId);
+      connectRunStream(newRunId);
+      setIsEmpty(false);
+      setIsDissolving(false);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to generate map';
+      console.error(message, error);
+      setReasoningSteps(prev => [...prev, {
+        id: `error-${Date.now()}`,
+        text: message,
+        timestamp: new Date(),
+        type: 'analysis',
+      }]);
+      setIsProcessing(false);
+      setIsDissolving(false);
+    }
+  }, [currentProject, connectRunStream, setNodes, setEdges]);
+
+  // Keep the ref in sync so handleDataSubmit can call handleGenerateMap without ordering issues
+  useEffect(() => {
+    handleGenerateMapRef.current = handleGenerateMap;
+  }, [handleGenerateMap]);
 
   // Re-categorize nodes 2s after graph settles (initial load or after expansion)
   useEffect(() => {
@@ -1088,6 +1195,10 @@ function KnowledgeGraphCanvasInner() {
         filterActive={hasActiveFilters(filters)}
         onUploadDocuments={handleUploadDocuments}
         graphLoaded={!isEmpty && !suppressGraphUntilMainEntity}
+        currentProject={currentProject}
+        projectDocumentCount={projectDocuments.length}
+        onGenerateMap={() => setShowProjectPicker(true)}
+        isGenerating={isProcessing}
       />
 
       <GraphFilterPanel
@@ -1122,6 +1233,53 @@ function KnowledgeGraphCanvasInner() {
         onSigmaNodeClick={handleSigmaNodeClick}
         onSigmaFocusNodes={handleFocusMultiple}
         onPaneClick={handlePaneClick}
+      />
+
+      {/* Projects button — visible on landing page */}
+      {isEmpty && !isDissolving && (
+        <motion.button
+          initial={{ opacity: 0, y: 6 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.4, duration: 0.3 }}
+          onClick={() => setShowProjectPicker(true)}
+          className="fixed bottom-10 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 px-4 py-2.5 rounded-2xl text-sm font-medium transition-all hover:scale-105"
+          style={{
+            background: 'var(--kg-node-bg)',
+            border: '1px solid var(--kg-node-border)',
+            boxShadow: 'var(--kg-shadow-md)',
+            color: 'var(--foreground)',
+          }}
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" style={{ opacity: 0.6 }}>
+            <path d="M2 4.5A1.5 1.5 0 013.5 3H6l1.5 2H13A1.5 1.5 0 0114.5 6.5v5A1.5 1.5 0 0113 13H3A1.5 1.5 0 011.5 11.5v-5A1.5 1.5 0 013 5" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+          </svg>
+          {currentProject ? (
+            <>
+              <span style={{ opacity: 0.55 }}>Project:</span>
+              <span>{currentProject.name}</span>
+              {projectDocuments.length > 0 && (
+                <span
+                  className="px-1.5 py-0.5 rounded-md text-[10px]"
+                  style={{ background: 'var(--muted)', color: 'var(--muted-foreground)' }}
+                >
+                  {projectDocuments.length} doc{projectDocuments.length !== 1 ? 's' : ''}
+                </span>
+              )}
+            </>
+          ) : (
+            <span>Projects</span>
+          )}
+        </motion.button>
+      )}
+
+      <ProjectPickerModal
+        isOpen={showProjectPicker}
+        onClose={() => setShowProjectPicker(false)}
+        currentProject={currentProject}
+        onSelectProject={project => { setCurrentProject(project); setProjectDocuments([]); }}
+        onGenerateFullMap={project => { setCurrentProject(project); void handleGenerateMap(project.name, project); }}
+        onGenerateCustomMap={(project, prompt) => { setCurrentProject(project); void handleGenerateMap(prompt, project); }}
+        isGenerating={isProcessing}
       />
 
       {/* Empty state blob */}

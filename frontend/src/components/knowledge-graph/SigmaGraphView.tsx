@@ -192,7 +192,7 @@ function nodeColor(node: GraphNode, activeNodeId?: string | null, highlightedNod
 
 // Camera ratio below this value means the user has zoomed in far enough to
 // read node labels → expand circles to rectangular cards.
-const EXPAND_ZOOM_THRESHOLD = 0.42;
+const EXPAND_ZOOM_THRESHOLD = 1.75;
 
 function isAlwaysExpandedNode(node: GraphNode, childCount: number): boolean {
   const data = node.data as GraphNodeData;
@@ -440,15 +440,20 @@ function computeBranchLayout(
   const sectorWidthOf = new Map<string, number>();
   sectorWidthOf.set(centerId, Math.PI * 2);
 
-  const SECTOR_SIBLING_MARGIN = 0.86; // children get 86% of parent's sector
+  const SECTOR_SIBLING_MARGIN = 0.92; // children get 86% of parent's sector
   // Minimum arc-length gap between adjacent node centers at the same ring.
-  const MIN_ARC_GAP = 24;
+  const MIN_ARC_GAP = 48;
   // Floor radius per depth level — each ring is at least this far from the
   // previous one so even sparse depths have visible separation.
-  const RING_FLOOR_PER_DEPTH = 90;
+  const RING_FLOOR_PER_DEPTH = 200;
   // Subtrees with more descendants push their root radially outward; leaves
   // sit at the base ring. This breaks the "all on one circle" pattern.
-  const RADIAL_STAGGER = 16;
+  const RADIAL_STAGGER = 50;
+  // Extra outward nudge per node so leaf nodes at the same depth don't all
+  // land on the exact same ring. Always positive so no node ever moves
+  // inward past the base ring — inward shifts caused ring-level violations
+  // that made the layout look chaotic.
+  const RADIAL_WAVE_AMP = 18;
 
   // Returns the base ring radius for a given depth + population count.
   // Adaptive: if the node count demands more arc, the ring grows to fit.
@@ -523,7 +528,12 @@ function computeBranchLayout(
       // look. log2 keeps the spread sub-linear so huge subtrees don't
       // push completely outside the visible area.
       const stagger = Math.log2(subtreeSize(child.id) + 1) * RADIAL_STAGGER;
-      const r = baseR + stagger;
+      // Outward nudge: stable hash on the node id, always positive so no
+      // node ever moves inward past the base ring (inward shifts caused
+      // nodes from different depths to collide, making the layout chaotic).
+      const idHash = child.id.split('').reduce((h, c) => (h * 31 + c.charCodeAt(0)) | 0, 0);
+      const wave = Math.abs(Math.sin(idHash)) * RADIAL_WAVE_AMP;
+      const r = baseR + stagger + wave;
 
       const x = Math.cos(angle) * r;
       const y = Math.sin(angle) * r;
@@ -594,7 +604,7 @@ function edgeRole(edge: GraphEdge): 'bucket' | 'scaffold' | 'bridge' | 'inferred
   const properties = data?.properties ?? {};
   if (data?.sigmaBucket || data?.sigmaBucketed) return 'bucket';
   if (label === 'expands' || label === 'also connects') return 'bridge';
-  if (properties.scaffoldRoute || properties.presentation || properties.synthetic) return 'scaffold';
+  if (properties.scaffoldRoute || properties.presentation || properties.synthetic || properties.expansion) return 'scaffold';
   if (properties.inferred) return 'inferred';
   return 'primary';
 }
@@ -802,6 +812,10 @@ function preferCategoryRoutes(
   };
 
   return edges.filter(edge => {
+    // Never drop expansion bridge or bucket edges — they carry newly-created
+    // nodes that must stay connected to their anchor regardless of entity type.
+    const role = edgeRole(edge);
+    if (role === 'bridge' || role === 'bucket') return true;
     const sourceIsMain = edge.source === mainEntityId;
     const targetIsMain = edge.target === mainEntityId;
     if (!sourceIsMain && !targetIsMain) return true;
@@ -1012,11 +1026,10 @@ function bucketOversizedFanouts(
 // stays at full opacity).
 function computeFocalSet(
   activeNodeId: string | null | undefined,
-  isStructuralActive: boolean,
   nodes: GraphNode[],
   edges: GraphEdge[],
 ): Set<string> | null {
-  if (!activeNodeId || isStructuralActive) return null;
+  if (!activeNodeId) return null;
   if (!nodes.some(node => node.id === activeNodeId)) return null;
 
   const set = new Set<string>([activeNodeId]);
@@ -1033,13 +1046,8 @@ function computeFocalSet(
     if (label !== 'contains' && label !== 'has_business_area') continue;
     incomingScaffold.set(edge.target, edge.source);
   }
-  let walker: string | undefined = incomingScaffold.get(activeNodeId);
-  const guard = new Set<string>();
-  while (walker && !guard.has(walker)) {
-    guard.add(walker);
-    set.add(walker);
-    walker = incomingScaffold.get(walker);
-  }
+  const immediateParent = incomingScaffold.get(activeNodeId);
+  if (immediateParent) set.add(immediateParent);
   return set;
 }
 
@@ -1101,10 +1109,10 @@ function createNodeCard(
     'display: none',
     'flex-direction: column',
     'gap: 2px',
-    'padding: 7px 12px',
-    'border-radius: 10px',
-    'min-width: 72px',
-    'max-width: 180px',
+    'padding: 4px 8px',
+    'border-radius: 8px',
+    'min-width: 48px',
+    'max-width: 110px',
     `background: ${bg}`,
     `color: ${text}`,
     `border: 1.5px solid ${colorWithAlpha(bg, 0.55)}`,
@@ -1113,7 +1121,7 @@ function createNodeCard(
     'user-select: none',
     'cursor: pointer',
     'font-family: inherit',
-    'font-size: 12px',
+    'font-size: 10px',
     'font-weight: 600',
     'line-height: 1.3',
     'overflow: hidden',
@@ -1133,7 +1141,7 @@ function createNodeCard(
     const typeEl = document.createElement('div');
     typeEl.dataset.role = 'type';
     typeEl.textContent = typeLabel;
-    typeEl.style.cssText = 'font-size: 10px; font-weight: 400; opacity: 0.75; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;';
+    typeEl.style.cssText = 'font-size: 8px; font-weight: 400; opacity: 0.75; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;';
     card.appendChild(typeEl);
   }
 
@@ -1454,6 +1462,7 @@ export function SigmaGraphView({
   // changes. The render path applies target dim immediately; the rAF
   // overrides for ~200ms to interpolate from the previous state.
   const prevFocalSetRef = useRef<Set<string> | null>(null);
+  const focalSetRef = useRef<Set<string> | null>(null);
   const dimAnimRafRef = useRef<number | null>(null);
   // Per-edge draw-on tween rAF ids so we can cancel/cleanup on unmount and
   // avoid leaking frames if an edge is dropped mid-animation.
@@ -1479,6 +1488,11 @@ export function SigmaGraphView({
   // Tracks the most zoomed-out ratio Sigma has ever used (set on animatedReset)
   // so we can clamp the wheel zoom-out to never exceed "see all nodes".
   const maxSeenRatioRef = useRef<number>(0);
+  // Node drag state — positions set by dragging survive re-renders and
+  // override the computed layout position so nodes stay where the user put them.
+  const draggedPositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
+  const draggingNodeRef = useRef<string | null>(null);
+  const isDraggingRef = useRef(false);
 
   const [selectedEvidence, setSelectedEvidence] = useState<EdgeEvidence | null>(null);
   const [selectedBucket, setSelectedBucket] = useState<BucketSelection | null>(null);
@@ -1579,6 +1593,9 @@ export function SigmaGraphView({
       const container = containerRef.current;
       if (!renderer || !container) return;
       const camera = renderer.getCamera();
+      // Re-enable camera in case a drag ended outside the canvas and the
+      // cleanup listener hasn't fired yet (belt-and-suspenders).
+      camera.enable();
       const delta = e.deltaY * -3 / 360;
       if (!delta) return;
       const ZOOMING_RATIO = 1.7;
@@ -1592,9 +1609,24 @@ export function SigmaGraphView({
       const newState = renderer.getViewportZoomedState(mousePos, newRatio);
       camera.animate(newState, { easing: 'quadraticOut', duration: 250 });
     };
+    // Global mouseup fallback: if the user releases the mouse outside the
+    // Sigma canvas while dragging, Sigma's own 'mouseup' event never fires,
+    // leaving the camera permanently disabled (kills panning and zoom).
+    const handleGlobalMouseUp = () => {
+      if (!draggingNodeRef.current && !isDraggingRef.current) return;
+      draggingNodeRef.current = null;
+      isDraggingRef.current = false;
+      rendererRef.current?.getCamera().enable();
+      if (rendererRef.current) rendererRef.current.getContainer().style.cursor = 'default';
+    };
+
     // passive: false required to allow e.preventDefault() for page-scroll prevention.
     el.addEventListener('wheel', handleWheel, { passive: false });
-    return () => el.removeEventListener('wheel', handleWheel);
+    document.addEventListener('mouseup', handleGlobalMouseUp);
+    return () => {
+      el.removeEventListener('wheel', handleWheel);
+      document.removeEventListener('mouseup', handleGlobalMouseUp);
+    };
   }, []);
 
   // Keep the overlay function ref always pointing at the latest closure so the
@@ -1643,15 +1675,17 @@ export function SigmaGraphView({
       card.style.left = `${vp.x}px`;
       card.style.top = `${vp.y}px`;
 
-      // Scale the card exactly like a Sigma circle would scale — proportional
-      // to zoom so the card shrinks as you zoom out and grows as you zoom in.
-      // Cap at 1.15 so text doesn't become enormous at very high zoom.
-      // No minimum floor: the card naturally shrinks to nothing when zoomed far out.
-      const scale = Math.min(1.15, EXPAND_ZOOM_THRESHOLD / Math.max(ratio, 0.05));
+      // Shrink cards proportionally as you zoom out (ratio increases).
+      // Clamp the ratio floor at 0.5 so cards stop growing once zoomed in past that point.
+      const scale = 0.4 / Math.max(ratio, 0.5);
       card.dataset.scale = String(scale);
       card.style.transform = `translate(-50%, -50%) scale(${scale})`;
 
       if (card.style.display !== 'flex') card.style.display = 'flex';
+
+      // Apply focal dim to the HTML card so it matches Sigma circle dimming.
+      const inFocal = !focalSetRef.current || focalSetRef.current.has(nodeId);
+      card.style.opacity = inFocal ? '1' : '0.2';
 
       // Hide the underlying Sigma circle so only the HTML card is visible.
       // Also suppress the Sigma label to prevent duplicate text next to circle.
@@ -1689,6 +1723,11 @@ export function SigmaGraphView({
         labelColor: { color: '#111827' },
         labelDensity: 0.12,
         labelRenderedSizeThreshold: 8,
+        // Scale node sizes proportionally with zoom so nodes shrink when zoomed
+        // out and grow when zoomed in, matching their graph-space footprint.
+        // The default Math.sqrt causes nodes to shrink too slowly, leading to
+        // visual overlap at low zoom levels.
+        zoomToSizeRatioFunction: (x: number) => x,
         // Edge labels are off globally — too noisy at scale. We flip
         // `forceLabel: true` on the hovered edge inside `enterEdge` so the
         // predicate appears next to the line without permanently cluttering
@@ -1699,7 +1738,34 @@ export function SigmaGraphView({
         edgeLabelColor: { color: '#475569' },
         zIndex: true,
       });
+      rendererRef.current.on('downNode', ({ node }) => {
+        if (isSigmaHaloNodeId(node)) return;
+        isDraggingRef.current = false;
+        draggingNodeRef.current = node;
+        rendererRef.current!.getCamera().disable();
+        rendererRef.current!.getContainer().style.cursor = 'grabbing';
+      });
+      rendererRef.current.on('mousemovebody', ({ x, y }) => {
+        if (!draggingNodeRef.current) return;
+        isDraggingRef.current = true;
+        const graphCoords = rendererRef.current!.viewportToGraph({ x, y });
+        const nodeId = draggingNodeRef.current;
+        if (graphRef.current?.hasNode(nodeId)) {
+          graphRef.current.setNodeAttribute(nodeId, 'x', graphCoords.x);
+          graphRef.current.setNodeAttribute(nodeId, 'y', graphCoords.y);
+          draggedPositionsRef.current.set(nodeId, graphCoords);
+        }
+        rendererRef.current?.refresh();
+      });
+      rendererRef.current.on('mouseup', () => {
+        draggingNodeRef.current = null;
+        rendererRef.current!.getCamera().enable();
+        if (!isDraggingRef.current) return;
+        isDraggingRef.current = false;
+        rendererRef.current!.getContainer().style.cursor = 'default';
+      });
       rendererRef.current.on('clickNode', ({ node }) => {
+        if (isDraggingRef.current) return;
         if (isSigmaHaloNodeId(node)) return;
         setSelectedEvidence(null);
         setShowAllEvidenceSources(false);
@@ -1843,7 +1909,16 @@ export function SigmaGraphView({
     // perfectly stable while making "what is this connected to and where
     // does it live" pop visually. When no selection (or the active node is
     // structural / the centre), the whole graph stays at full strength.
-    const focalSet = computeFocalSet(activeNodeId, isStructuralActive, visibleNodes, visibleEdges);
+    // Suppress focal dim when the active node is the graph centre (main entity).
+    // The centre is the root of the entire layout — dimming relative to it would
+    // grey out most of the graph on initial load (when the main entity is
+    // auto-selected) and whenever the user clicks back to it.
+    const focalSet = computeFocalSet(
+      activeNodeId === centerId ? null : activeNodeId,
+      visibleNodes,
+      visibleEdges,
+    );
+    focalSetRef.current = focalSet;
     rendererRef.current.setSettings(sigmaLabelSettings(visibleNodes.length, viewMode));
     const haloId = centerId ? `${SIGMA_HALO_PREFIX}${centerId}` : null;
     // A second, smaller halo follows the user-selected node when it isn't
@@ -1857,7 +1932,18 @@ export function SigmaGraphView({
     if (activeHaloId) nodeIds.add(activeHaloId);
     const renderableEdges = selectRenderableEdges(visibleNodes, visibleEdges, activeNodeId, viewMode);
     const edgeIds = new Set(renderableEdges.map(edgeKey));
-    const positions = computeBranchLayout(visibleNodes, renderableEdges, activeNodeId, viewMode);
+    // Layout positions must not depend on which node is selected. Cross-link
+    // edges (revealed only for the active entity) are excluded so that
+    // deselecting a node never shifts node positions — only dims edges.
+    const scaffoldOnlyLodEdges = filterToScaffoldEdges(categoryRouted, null);
+    const scaffoldCenterBucketed = bucketCentralFanout(lodNodes, scaffoldOnlyLodEdges, centerId);
+    const scaffoldFanoutBucketed = bucketOversizedFanouts(
+      scaffoldCenterBucketed.nodes,
+      scaffoldCenterBucketed.edges,
+      expandedBucketIds,
+    );
+    const layoutEdges = selectRenderableEdges(scaffoldFanoutBucketed.nodes, scaffoldFanoutBucketed.edges, activeNodeId, viewMode);
+    const positions = computeBranchLayout(visibleNodes, layoutEdges, activeNodeId, viewMode);
     nodeLabelByIdRef.current = new Map(visibleNodes.map(node => [node.id, nodeLabel(node)]));
     documentNodeBySourceKeyRef.current = buildDocumentSourceIndex(nodes);
     edgeByIdRef.current = new Map(renderableEdges.map((edge, index) => [edgeKey(edge, index), edge]));
@@ -2018,7 +2104,13 @@ export function SigmaGraphView({
     };
 
     const addOrUpdateNode = (node: GraphNode) => {
-      const position = positions.get(node.id) ?? { id: node.id, x: 0, y: 0, depth: 0, angle: 0 };
+      const computedPosition = positions.get(node.id) ?? { id: node.id, x: 0, y: 0, depth: 0, angle: 0 };
+      // If the user has manually dragged this node, use their position so it
+      // doesn't snap back to the layout on every re-render.
+      const draggedPos = draggedPositionsRef.current.get(node.id);
+      const position = draggedPos
+        ? { ...computedPosition, x: draggedPos.x, y: draggedPos.y }
+        : computedPosition;
       const baseAttrs = nodeAttributes(node, position, activeNodeId, highlightedNodes, viewMode, visibleNodes.length);
       // Force labels for every node in the focal set so the user can read
       // the names of all connected entities at a glance once they've
@@ -2032,7 +2124,8 @@ export function SigmaGraphView({
         ? { ...baseAttrs, ...(focalLabelOverride ?? {}), color: applyFocalDim(baseAttrs.color, focalSet, node.id) }
         : baseAttrs;
       const firstSeenAt = firstSeenAtRef.current.get(node.id);
-      const isSticky = firstSeenAt !== undefined && performance.now() - firstSeenAt > STICKY_NODE_AFTER_MS && centerId === previousCenterIdRef.current;
+      const isSticky = draggedPositionsRef.current.has(node.id)
+        || (firstSeenAt !== undefined && performance.now() - firstSeenAt > STICKY_NODE_AFTER_MS && centerId === previousCenterIdRef.current);
       // Save the "intended" attrs for this node so updateNodeOverlay can
       // restore them when the node transitions back from card → circle mode.
       if (!isSigmaHaloNodeId(node.id)) {
@@ -2290,12 +2383,12 @@ export function SigmaGraphView({
     previousCenterIdRef.current = centerId;
     previousActiveIdRef.current = activeNodeId;
 
-    // Fly-to target: prefer the user-selected active node so clicking a
-    // deep entity actually flies the camera to it. Falls back to centerId
-    // for the first-paint case (when no active node has been picked yet).
-    const flyToId = activeChanged && activeNodeId
-      ? activeNodeId
-      : (centerChanged && centerId ? centerId : null);
+    // Only fly the camera when the centre node itself changes (happens on the
+    // very first paint when centerId is established). Node-click selections
+    // change activeNodeId but must NOT move the camera — the user expects the
+    // graph to stay exactly where they left it, with only the highlight/dim
+    // overlay updating in place.
+    const flyToId = centerChanged && centerId ? centerId : null;
     if (wasEmpty && visibleNodes.length > 0) {
       void rendererRef.current.getCamera().animatedReset({ duration: 420 });
     } else if (flyToId) {
