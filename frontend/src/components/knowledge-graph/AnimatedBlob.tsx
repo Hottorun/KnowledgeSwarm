@@ -1,7 +1,7 @@
 import { motion, AnimatePresence } from 'framer-motion';
 import { useState, useCallback, useRef } from 'react';
 import type { AIReasoningStep } from './types';
-import { checkMcpHealth, mcpReadAllFiles, MCP_CONNECTOR_URL } from '@/lib/api';
+import { DEMO, checkMcpHealth, mcpReadAllFiles, MCP_CONNECTOR_URL } from '@/lib/api';
 import { extractFileText } from '@/lib/pdf';
 
 const READABLE_EXTENSIONS = /\.(txt|md|csv|json|pdf)$/i;
@@ -155,7 +155,7 @@ export function AnimatedBlob({ onDataSubmit, isDissolving }: AnimatedBlobProps) 
         {/* Drop / click zone */}
         <div
           className="relative flex flex-col items-center cursor-pointer"
-          onClick={() => fileInputRef.current?.click()}
+          onClick={() => DEMO ? void onDataSubmit('Acme Corp', 'Acme Corp') : fileInputRef.current?.click()}
         >
           <motion.div
             animate={{ scale: isDragOver ? 1.1 : 1 }}
@@ -172,13 +172,13 @@ export function AnimatedBlob({ onDataSubmit, isDissolving }: AnimatedBlobProps) 
                     className="text-sm font-semibold"
                     style={{ color: 'white', textShadow: '0 1px 4px rgba(0,0,0,0.25)' }}
                   >
-                    {isDragOver ? 'Drop to begin' : 'Drop or click to add files'}
+                    {DEMO ? 'Start demo' : isDragOver ? 'Drop to begin' : 'Drop or click to add files'}
                   </p>
                   <p
                     className="text-xs mt-1 opacity-80"
                     style={{ color: 'white', textShadow: '0 1px 3px rgba(0,0,0,0.25)' }}
                   >
-                    .pdf · .txt · .md · .csv · .json
+                    {DEMO ? '5 sample documents about Acme Corp' : '.pdf · .txt · .md · .csv · .json'}
                   </p>
                   {fileError && (
                     <p className="text-xs mt-2 px-2 py-1 rounded-lg font-medium"
@@ -205,7 +205,19 @@ export function AnimatedBlob({ onDataSubmit, isDissolving }: AnimatedBlobProps) 
           />
         </div>
 
-        {/* MCP connector panel */}
+        {DEMO ? (
+          <motion.p
+            className="text-xs text-center w-72"
+            style={{ color: 'var(--muted-foreground)' }}
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.5, duration: 0.4 }}
+          >
+            A scripted run on sample documents. Nothing is sent to an AI model, so the
+            graph is the same every time.
+          </motion.p>
+        ) : (
+        /* MCP connector panel */
         <motion.div
           className="flex flex-col items-center gap-3 w-72"
           initial={{ opacity: 0, y: 6 }}
@@ -276,6 +288,7 @@ export function AnimatedBlob({ onDataSubmit, isDissolving }: AnimatedBlobProps) 
             Download MCP connector ↓
           </a>
         </motion.div>
+        )}
       </div>
     </motion.div>
   );

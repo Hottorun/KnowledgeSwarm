@@ -1,0 +1,7 @@
+{
+  "framework": null,
+  "installCommand": "npm ci",
+  "buildCommand": "vite build --mode demo",
+  "outputDirectory": "dist/client",
+  "rewrites": [{ "source": "/(.*)", "destination": "/_shell.html" }]
+}

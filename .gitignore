@@ -25,3 +25,6 @@ dist/
 .env
 .env.*
 !.env.example
+# Only switches on the public demo build; no secrets
+!.env.demo
+.vercel

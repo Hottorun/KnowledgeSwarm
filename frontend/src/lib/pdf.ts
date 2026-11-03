@@ -18,6 +18,8 @@ async function extractPdfViaBackend(file: File): Promise<string> {
 }
 
 export async function extractFileText(file: File): Promise<string> {
+  // The demo builds the same graph whatever is dropped in, so there is nothing to parse.
+  if ((import.meta.env as Record<string, string>).VITE_DEMO === 'true') return file.name;
   if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
     return extractPdfViaBackend(file);
   }

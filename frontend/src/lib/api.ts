@@ -2,6 +2,14 @@ const API_BASE = (import.meta.env as Record<string, string>).VITE_API_BASE_URL ?
 
 export { API_BASE };
 
+/**
+ * The public demo build replays a prepared graph instead of calling the
+ * backend (see demo.ts), so it never reaches Claude or web search.
+ */
+export const DEMO = (import.meta.env as Record<string, string>).VITE_DEMO === 'true';
+let demoModule: typeof import('./demo') | null = null;
+const demo = async () => (demoModule ??= await import('./demo'));
+
 export interface Project {
   id: string;
   name: string;
@@ -35,6 +43,7 @@ export interface ProjectWithDetails extends Project {
 }
 
 export async function createProject(name: string): Promise<Project> {
+  if (DEMO) throw new Error((await demo()).NOT_IN_DEMO);
   const res = await fetch(`${API_BASE}/projects`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -48,12 +57,14 @@ export async function createProject(name: string): Promise<Project> {
 }
 
 export async function listProjects(): Promise<Project[]> {
+  if (DEMO) return [];
   const res = await fetch(`${API_BASE}/projects`);
   if (!res.ok) return [];
   return res.json() as Promise<Project[]>;
 }
 
 export async function getProject(projectId: string): Promise<ProjectWithDetails> {
+  if (DEMO) throw new Error((await demo()).NOT_IN_DEMO);
   const res = await fetch(`${API_BASE}/projects/${projectId}`);
   if (!res.ok) {
     const data = await res.json() as { error?: string };
@@ -68,6 +79,7 @@ export async function uploadDocument(
   mimeType: string,
   rawText: string,
 ): Promise<ProjectDocument> {
+  if (DEMO) throw new Error((await demo()).NOT_IN_DEMO);
   const res = await fetch(`${API_BASE}/projects/${projectId}/documents`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -81,6 +93,7 @@ export async function uploadDocument(
 }
 
 export async function deleteDocument(projectId: string, docId: string): Promise<void> {
+  if (DEMO) throw new Error((await demo()).NOT_IN_DEMO);
   const res = await fetch(`${API_BASE}/projects/${projectId}/documents/${docId}`, {
     method: 'DELETE',
   });
@@ -95,6 +108,7 @@ export async function generateMap(
   prompt: string,
   documentIds?: string[],
 ): Promise<{ mapId: string; runId: string }> {
+  if (DEMO) throw new Error((await demo()).NOT_IN_DEMO);
   const res = await fetch(`${API_BASE}/projects/${projectId}/maps`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -108,12 +122,14 @@ export async function generateMap(
 }
 
 export async function listMaps(projectId: string): Promise<ProjectMap[]> {
+  if (DEMO) return [];
   const res = await fetch(`${API_BASE}/projects/${projectId}/maps`);
   if (!res.ok) return [];
   return res.json() as Promise<ProjectMap[]>;
 }
 
 export async function checkAIStatus(): Promise<boolean> {
+  if (DEMO) return true;
   try {
     const res = await fetch(`${API_BASE}/ai/status`);
     if (!res.ok) return false;
@@ -125,6 +141,7 @@ export async function checkAIStatus(): Promise<boolean> {
 }
 
 export async function saveOpenAIKey(apiKey: string): Promise<void> {
+  if (DEMO) throw new Error((await demo()).NOT_IN_DEMO);
   const res = await fetch(`${API_BASE}/ai/key`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -138,6 +155,7 @@ export async function saveOpenAIKey(apiKey: string): Promise<void> {
 }
 
 export async function createRun(prompt: string): Promise<string> {
+  if (DEMO) return (await demo()).createRun();
   const res = await fetch(`${API_BASE}/runs`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -149,6 +167,8 @@ export async function createRun(prompt: string): Promise<string> {
 }
 
 export function openRunStream(runId: string): EventSource {
+  // createRun always runs first, so the demo module is already loaded here.
+  if (DEMO && demoModule) return demoModule.openRunStream(runId);
   return new EventSource(`${API_BASE}/runs/${runId}/events`);
 }
 
@@ -157,6 +177,7 @@ export async function swarmExtractFromText(
   text: string,
   documentName = 'input',
 ): Promise<void> {
+  if (DEMO) return (await demo()).extractFromText(runId);
   const res = await fetch(`${API_BASE}/ai/runs/${runId}/swarm-extract`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -173,6 +194,7 @@ export async function extractFromText(
   text: string,
   documentName = 'input',
 ): Promise<void> {
+  if (DEMO) return (await demo()).extractFromText(runId);
   try {
     await swarmExtractFromText(runId, text, documentName);
     return;
@@ -199,6 +221,7 @@ export interface NodeCategory {
 export async function categorizeNodes(
   nodes: Array<{ id: string; label: string; type: string }>,
 ): Promise<NodeCategory[]> {
+  if (DEMO) return (await demo()).categorizeNodes(nodes);
   try {
     const res = await fetch(`${API_BASE}/ai/categorize-nodes`, {
       method: 'POST',
@@ -224,6 +247,7 @@ export async function nestLevel1Entities(
   entities: Array<{ id: string; label: string; type: string }>,
   mainEntityLabel?: string,
 ): Promise<NestLevel1Result> {
+  if (DEMO) return (await demo()).nestLevel1Entities();
   const res = await fetch(`${API_BASE}/ai/runs/${runId}/nest-level1`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -247,6 +271,7 @@ export async function describeNode(
   entityType: string,
   relationships: NodeRelationship[],
 ): Promise<string | null> {
+  if (DEMO) return (await demo()).describeNode(label, entityType, relationships);
   try {
     const res = await fetch(`${API_BASE}/ai/describe-node`, {
       method: 'POST',
@@ -267,6 +292,7 @@ export async function extractFromFile(runId: string, file: File): Promise<void> 
 }
 
 export async function checkMcpHealth(mcpServerUrl?: string): Promise<{ ok: boolean; error?: string; mcpServerUrl?: string }> {
+  if (DEMO) return { ok: false, error: (await demo()).NOT_IN_DEMO };
   try {
     const res = await fetch(`${API_BASE}/mcp/health`, {
       method: 'POST',
@@ -294,6 +320,7 @@ export async function checkMcpHealthDirect(mcpServerUrl: string): Promise<{ ok: 
 }
 
 export async function mcpListDirectory(path: string, mcpServerUrl?: string): Promise<string> {
+  if (DEMO) throw new Error((await demo()).NOT_IN_DEMO);
   const res = await fetch(`${API_BASE}/mcp/list-directory`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -305,6 +332,7 @@ export async function mcpListDirectory(path: string, mcpServerUrl?: string): Pro
 }
 
 export async function mcpReadFile(path: string, mcpServerUrl?: string): Promise<string> {
+  if (DEMO) throw new Error((await demo()).NOT_IN_DEMO);
   const res = await fetch(`${API_BASE}/mcp/read-file`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -328,6 +356,7 @@ export async function mcpReadAll(mcpServerUrl?: string): Promise<string> {
 }
 
 export async function mcpReadAllFiles(mcpServerUrl?: string): Promise<Array<{ name: string; text: string }>> {
+  if (DEMO) throw new Error((await demo()).NOT_IN_DEMO);
   const res = await fetch(`${API_BASE}/mcp/read-all`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -378,6 +407,7 @@ export async function queryGraph(
   nodes: SubtreeNode[],
   edges: SubtreeEdge[],
 ): Promise<{ answer: string; newTriplesPersisted: number; searchQueries: string[] }> {
+  if (DEMO) return (await demo()).queryGraph(runId, question, nodes, edges);
   const res = await fetch(`${API_BASE}/ai/runs/${runId}/query-graph`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -398,6 +428,7 @@ export async function expandSubtree(
   question?: string,
   ctx?: ExpandContext,
 ): Promise<{ summary: string; newTriplesPersisted: number }> {
+  if (DEMO) return (await demo()).expandSubtree(runId, rootNode, nodes, edges, question, ctx);
   const res = await fetch(`${API_BASE}/ai/runs/${runId}/expand-subtree`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

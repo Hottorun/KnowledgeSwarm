@@ -21,7 +21,7 @@ import {
 } from './presentationGraph';
 import type { AIReasoningStep, DataSource } from './types';
 import type { NodeRelationship } from './NodeInputBox';
-import { createRun, extractFromText, queryGraph as apiQueryGraph, categorizeNodes, nestLevel1Entities, type NodeCategory, uploadDocument, generateMap, type Project, type ProjectDocument } from '@/lib/api';
+import { DEMO, createRun, extractFromText, queryGraph as apiQueryGraph, categorizeNodes, nestLevel1Entities, type NodeCategory, uploadDocument, generateMap, type Project, type ProjectDocument } from '@/lib/api';
 import { ProjectPickerModal } from './ProjectPickerModal';
 import { extractFileText } from '@/lib/pdf';
 import { QueryBox } from './QueryBox';
@@ -1236,7 +1236,7 @@ function KnowledgeGraphCanvasInner() {
       />
 
       {/* Projects button — visible on landing page */}
-      {isEmpty && !isDissolving && (
+      {isEmpty && !isDissolving && !DEMO && (
         <motion.button
           initial={{ opacity: 0, y: 6 }}
           animate={{ opacity: 1, y: 0 }}
